@@ -85,7 +85,12 @@
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.10.0/lib/xterm-addon-fit.min.js"></script>
 <script>
 (() => {
+  const ACK_BATCH_BYTES = 262144;
+  const ACK_FLUSH_MS = 120;
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get("token") || "";
   const statusEl = document.getElementById("status");
+
   const term = new Terminal({
     cursorBlink: true,
     convertEol: true,
@@ -102,66 +107,149 @@
   term.open(document.getElementById("terminal"));
   fitAddon.fit();
 
-  const params = new URLSearchParams(window.location.search);
-  const token = params.get("token") || "";
-  const proto = window.location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${proto}://${window.location.host}/ws`);
-  ws.binaryType = "arraybuffer";
+  let ws = null;
+  let reconnectDelay = 500;
+  let reconnectTimer = null;
+  let readonly = false;
+  let pendingAckBytes = 0;
+  let ackTimer = null;
 
   function setStatus(text, cls) {
     statusEl.className = cls || "";
     statusEl.textContent = text;
   }
 
-  ws.onopen = () => {
-    setStatus("Connected", "ok");
-    ws.send(JSON.stringify({ type: "auth", token, columns: term.cols, rows: term.rows }));
-  };
+  function wsURL() {
+    const proto = window.location.protocol === "https:" ? "wss" : "ws";
+    return `${proto}://${window.location.host}/ws`;
+  }
 
-  ws.onmessage = (ev) => {
-    if (ev.data instanceof ArrayBuffer) {
-      term.write(new Uint8Array(ev.data));
+  function sendAck(force) {
+    if (ackTimer) {
+      clearTimeout(ackTimer);
+      ackTimer = null;
+    }
+    if (!pendingAckBytes) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
       return;
     }
-    try {
-      const msg = JSON.parse(ev.data);
+    if (!force && pendingAckBytes < ACK_BATCH_BYTES) {
+      ackTimer = setTimeout(() => sendAck(true), ACK_FLUSH_MS);
+      return;
+    }
+    ws.send(JSON.stringify({ type: "ack", bytes: pendingAckBytes }));
+    pendingAckBytes = 0;
+  }
+
+  function queueAck(bytes) {
+    if (!bytes || bytes <= 0) return;
+    pendingAckBytes += bytes;
+    if (pendingAckBytes >= ACK_BATCH_BYTES) {
+      sendAck(true);
+      return;
+    }
+    if (!ackTimer) {
+      ackTimer = setTimeout(() => sendAck(true), ACK_FLUSH_MS);
+    }
+  }
+
+  function scheduleReconnect() {
+    if (reconnectTimer) return;
+    const wait = Math.min(reconnectDelay, 10000);
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connect();
+      reconnectDelay = Math.min(reconnectDelay * 2, 10000);
+    }, wait);
+  }
+
+  function connect() {
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+    ws = new WebSocket(wsURL());
+    ws.binaryType = "arraybuffer";
+
+    ws.onopen = () => {
+      reconnectDelay = 500;
+      setStatus("Connected", "ok");
+      ws.send(JSON.stringify({ type: "auth", token, columns: term.cols, rows: term.rows }));
+      ws.send(JSON.stringify({ type: "resize", columns: term.cols, rows: term.rows }));
+      sendAck(true);
+    };
+
+    ws.onmessage = (ev) => {
+      if (ev.data instanceof ArrayBuffer) {
+        const bytes = ev.data.byteLength;
+        term.write(new Uint8Array(ev.data), () => queueAck(bytes));
+        return;
+      }
+      let msg = null;
+      try {
+        msg = JSON.parse(ev.data);
+      } catch {
+        term.writeln(`\r\n${ev.data}`);
+        return;
+      }
+      if (!msg || !msg.type) return;
       if (msg.type === "info" && msg.message) {
         term.writeln(`\r\n${msg.message}`);
       }
       if (msg.type === "readonly") {
+        readonly = true;
         setStatus("Read-only", "warn");
       }
       if (msg.type === "auth_ok") {
-        setStatus("Live session", "ok");
+        setStatus(readonly ? "Read-only" : "Live session", readonly ? "warn" : "ok");
       }
       if (msg.type === "auth_error") {
         setStatus("Auth failed", "error");
       }
-    } catch {
-      term.writeln(`\r\n${ev.data}`);
-    }
-  };
+      if (msg.type === "flow_pause") {
+        setStatus("Slow network (paused)", "warn");
+      }
+      if (msg.type === "flow_resume") {
+        setStatus(readonly ? "Read-only" : "Live session", readonly ? "warn" : "ok");
+      }
+      if (msg.type === "pong") {
+        // app-level pong is optional, no action needed.
+      }
+    };
 
-  ws.onclose = () => setStatus("Disconnected", "error");
-  ws.onerror = () => setStatus("Connection error", "error");
+    ws.onclose = () => {
+      setStatus("Disconnected. Reconnecting...", "error");
+      scheduleReconnect();
+    };
+
+    ws.onerror = () => {
+      setStatus("Connection error", "error");
+    };
+  }
 
   term.onData((data) => {
+    if (readonly) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      setStatus("Reconnecting...", "warn");
+      return;
+    }
     ws.send(JSON.stringify({ type: "input", data }));
   });
 
   function sendResize() {
     fitAddon.fit();
-    ws.send(JSON.stringify({ type: "resize", columns: term.cols, rows: term.rows }));
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "resize", columns: term.cols, rows: term.rows }));
+    }
   }
 
-  window.addEventListener("resize", () => {
-    if (ws.readyState === WebSocket.OPEN) sendResize();
-  });
+  window.addEventListener("resize", sendResize);
   term.onResize(({ cols, rows }) => {
-    if (ws.readyState === WebSocket.OPEN) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "resize", columns: cols, rows }));
     }
   });
+
+  connect();
 })();
 </script>
 </body>

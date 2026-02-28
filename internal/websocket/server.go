@@ -22,7 +22,18 @@ type Message struct {
 	Data    string `json:"data,omitempty"`
 	Columns int    `json:"columns,omitempty"`
 	Rows    int    `json:"rows,omitempty"`
+	Bytes   int64  `json:"bytes,omitempty"`
 	Message string `json:"message,omitempty"`
+}
+
+type ServerOptions struct {
+	ReadOnly            bool
+	MaxClients          int
+	LowWatermarkBytes   int64
+	HighWatermarkBytes  int64
+	PingInterval        time.Duration
+	ClientReadTimeout   time.Duration
+	OnClientCountChange func(int)
 }
 
 type Server struct {
@@ -41,22 +52,41 @@ type Server struct {
 	writeMu sync.Mutex
 	connMu  sync.Mutex
 	conns   map[*gws.Conn]struct{}
+
+	flowMu sync.Mutex
+	flow   flowController
+
+	pingInterval      time.Duration
+	clientReadTimeout time.Duration
 }
 
-func New(terminal *session.Terminal, token string, readonly bool, maxClient int, onClientCountChange func(int)) *Server {
-	if maxClient <= 0 {
-		maxClient = 1
+func New(terminal *session.Terminal, token string, opts ServerOptions) *Server {
+	maxClients := opts.MaxClients
+	if maxClients <= 0 {
+		maxClients = 1
 	}
+	pingInterval := opts.PingInterval
+	if pingInterval <= 0 {
+		pingInterval = 25 * time.Second
+	}
+	clientReadTimeout := opts.ClientReadTimeout
+	if clientReadTimeout <= 0 {
+		clientReadTimeout = 90 * time.Second
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{
 		terminal:            terminal,
 		token:               token,
-		readonly:            readonly,
-		maxClient:           maxClient,
-		onClientCountChange: onClientCountChange,
+		readonly:            opts.ReadOnly,
+		maxClient:           maxClients,
+		onClientCountChange: opts.OnClientCountChange,
 		ctx:                 ctx,
 		cancel:              cancel,
 		conns:               map[*gws.Conn]struct{}{},
+		flow:                newFlowController(opts.LowWatermarkBytes, opts.HighWatermarkBytes),
+		pingInterval:        pingInterval,
+		clientReadTimeout:   clientReadTimeout,
 		upgrader: gws.Upgrader{
 			ReadBufferSize:  4096,
 			WriteBufferSize: 4096,
@@ -87,6 +117,7 @@ func (s *Server) Close() {
 		s.onClientCountChange(0)
 	}
 	s.connMu.Unlock()
+	s.resetFlow()
 }
 
 func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
@@ -107,10 +138,22 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.removeConn(conn)
+
+	_ = conn.SetReadDeadline(time.Now().Add(s.clientReadTimeout))
+	conn.SetPongHandler(func(string) error {
+		_ = conn.SetReadDeadline(time.Now().Add(s.clientReadTimeout))
+		return nil
+	})
+
+	done := make(chan struct{})
+	defer close(done)
+	go s.pingLoop(conn, done)
+
 	_ = conn.WriteMessage(gws.TextMessage, mustJSON(Message{Type: "auth_ok"}))
 	if s.readonly {
 		_ = conn.WriteMessage(gws.TextMessage, mustJSON(Message{Type: "readonly", Message: "🔒 Read-only mode enabled"}))
 	}
+
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -129,6 +172,26 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		s.handleClientMessage(conn, msg)
+	}
+}
+
+func (s *Server) pingLoop(conn *gws.Conn, done <-chan struct{}) {
+	ticker := time.NewTicker(s.pingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			s.writeMu.Lock()
+			err := conn.WriteControl(gws.PingMessage, []byte("ping"), time.Now().Add(3*time.Second))
+			s.writeMu.Unlock()
+			if err != nil {
+				return
+			}
+		}
 	}
 }
 
@@ -174,11 +237,15 @@ func (s *Server) addConn(conn *gws.Conn) error {
 func (s *Server) removeConn(conn *gws.Conn) {
 	s.connMu.Lock()
 	delete(s.conns, conn)
+	connCount := len(s.conns)
 	if s.onClientCountChange != nil {
-		s.onClientCountChange(len(s.conns))
+		s.onClientCountChange(connCount)
 	}
 	s.connMu.Unlock()
 	_ = conn.Close()
+	if connCount == 0 {
+		s.resetFlow()
+	}
 }
 
 func (s *Server) handleClientMessage(conn *gws.Conn, msg Message) {
@@ -193,6 +260,13 @@ func (s *Server) handleClientMessage(conn *gws.Conn, msg Message) {
 		_ = s.terminal.Resize(msg.Columns, msg.Rows)
 	case "ping":
 		_ = conn.WriteMessage(gws.TextMessage, mustJSON(Message{Type: "pong"}))
+	case "ack":
+		event := s.onBytesAcked(msg.Bytes)
+		if event == flowEventResume {
+			s.broadcastText(Message{Type: "flow_resume", Message: "⚡ Output resumed"})
+		}
+	case "pong":
+		// no-op; browser may send app-level pong in addition to ws control pong.
 	}
 }
 
@@ -204,6 +278,9 @@ func (s *Server) readTerminalLoop() {
 			return
 		default:
 		}
+		if !s.waitForFlowResume() {
+			return
+		}
 		n, err := s.terminal.Read(buf)
 		if n > 0 {
 			s.broadcastBinary(buf[:n])
@@ -213,6 +290,43 @@ func (s *Server) readTerminalLoop() {
 			return
 		}
 	}
+}
+
+func (s *Server) waitForFlowResume() bool {
+	for {
+		if !s.isFlowPaused() {
+			return true
+		}
+		select {
+		case <-s.ctx.Done():
+			return false
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+}
+
+func (s *Server) isFlowPaused() bool {
+	s.flowMu.Lock()
+	defer s.flowMu.Unlock()
+	return s.flow.paused
+}
+
+func (s *Server) onBytesSent(n int) flowEvent {
+	s.flowMu.Lock()
+	defer s.flowMu.Unlock()
+	return s.flow.onSent(n)
+}
+
+func (s *Server) onBytesAcked(n int64) flowEvent {
+	s.flowMu.Lock()
+	defer s.flowMu.Unlock()
+	return s.flow.onAck(n)
+}
+
+func (s *Server) resetFlow() {
+	s.flowMu.Lock()
+	s.flow.reset()
+	s.flowMu.Unlock()
 }
 
 func (s *Server) broadcastBinary(data []byte) {
@@ -226,11 +340,22 @@ func (s *Server) broadcastBinary(data []byte) {
 		return
 	}
 	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	sentBytes := 0
 	for _, conn := range conns {
 		_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		if err := conn.WriteMessage(gws.BinaryMessage, data); err != nil {
 			_ = conn.Close()
+			continue
+		}
+		if len(data) > sentBytes {
+			sentBytes = len(data)
+		}
+	}
+	s.writeMu.Unlock()
+	if sentBytes > 0 {
+		event := s.onBytesSent(sentBytes)
+		if event == flowEventPause {
+			s.broadcastText(Message{Type: "flow_pause", Message: "⏸️ Network is slow; pausing output to protect session"})
 		}
 	}
 }
