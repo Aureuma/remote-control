@@ -31,15 +31,16 @@ func TestE2EStartStatusStop(t *testing.T) {
 		"--no-caffeinate",
 	)
 	serverCmd.Env = append(os.Environ(), "SI_REMOTE_CONTROL_HOME="+home)
-	startLogs := &strings.Builder{}
-	serverCmd.Stdout = startLogs
-	serverCmd.Stderr = startLogs
+	startLogFile := mustTempFile(t)
+	defer func() { _ = startLogFile.Close() }()
+	serverCmd.Stdout = startLogFile
+	serverCmd.Stderr = startLogFile
 	if err := serverCmd.Start(); err != nil {
 		t.Fatalf("start remote-control: %v", err)
 	}
 	defer killProcess(serverCmd)
 
-	waitForSessionState(t, home, id, 10*time.Second, startLogs.String())
+	waitForSessionState(t, home, id, 10*time.Second, startLogFile.Name())
 
 	statusOut := runRemoteControlCmd(t, bin, home, "status")
 	if !strings.Contains(statusOut, id) {
@@ -53,7 +54,7 @@ func TestE2EStartStatusStop(t *testing.T) {
 	if !strings.Contains(stopOut, "Stop signal sent") {
 		t.Fatalf("unexpected stop output:\n%s", stopOut)
 	}
-	waitForProcessExit(t, serverCmd, 10*time.Second, startLogs.String())
+	waitForProcessExit(t, serverCmd, 10*time.Second, startLogFile.Name())
 }
 
 func TestE2EAttachStatusStop(t *testing.T) {
@@ -89,15 +90,16 @@ func TestE2EAttachStatusStop(t *testing.T) {
 		"--no-caffeinate",
 	)
 	serverCmd.Env = append(os.Environ(), "SI_REMOTE_CONTROL_HOME="+home)
-	attachLogs := &strings.Builder{}
-	serverCmd.Stdout = attachLogs
-	serverCmd.Stderr = attachLogs
+	attachLogFile := mustTempFile(t)
+	defer func() { _ = attachLogFile.Close() }()
+	serverCmd.Stdout = attachLogFile
+	serverCmd.Stderr = attachLogFile
 	if err := serverCmd.Start(); err != nil {
 		t.Fatalf("start attach session: %v", err)
 	}
 	defer killProcess(serverCmd)
 
-	waitForSessionState(t, home, id, 10*time.Second, attachLogs.String())
+	waitForSessionState(t, home, id, 10*time.Second, attachLogFile.Name())
 
 	statusOut := runRemoteControlCmd(t, bin, home, "status")
 	if !strings.Contains(statusOut, id) {
@@ -111,7 +113,7 @@ func TestE2EAttachStatusStop(t *testing.T) {
 	if !strings.Contains(stopOut, "Stop signal sent") {
 		t.Fatalf("unexpected stop output:\n%s", stopOut)
 	}
-	waitForProcessExit(t, serverCmd, 10*time.Second, attachLogs.String())
+	waitForProcessExit(t, serverCmd, 10*time.Second, attachLogFile.Name())
 }
 
 func buildRemoteControlBinaryForTest(t *testing.T) string {
@@ -157,7 +159,7 @@ func runRemoteControlCmd(t *testing.T, bin, home string, args ...string) string 
 	return string(out)
 }
 
-func waitForSessionState(t *testing.T, home, id string, timeout time.Duration, logs string) {
+func waitForSessionState(t *testing.T, home, id string, timeout time.Duration, logPath string) {
 	t.Helper()
 	statePath := filepath.Join(home, "runtime", id+".json")
 	deadline := time.Now().Add(timeout)
@@ -166,13 +168,13 @@ func waitForSessionState(t *testing.T, home, id string, timeout time.Duration, l
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for session state %s\nlogs:\n%s", statePath, logs)
+			t.Fatalf("timed out waiting for session state %s\nlogs:\n%s", statePath, readLogFile(logPath))
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 }
 
-func waitForProcessExit(t *testing.T, cmd *exec.Cmd, timeout time.Duration, logs string) {
+func waitForProcessExit(t *testing.T, cmd *exec.Cmd, timeout time.Duration, logPath string) {
 	t.Helper()
 	done := make(chan error, 1)
 	go func() {
@@ -181,11 +183,31 @@ func waitForProcessExit(t *testing.T, cmd *exec.Cmd, timeout time.Duration, logs
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("session process exited with error: %v\nlogs:\n%s", err, logs)
+			t.Fatalf("session process exited with error: %v\nlogs:\n%s", err, readLogFile(logPath))
 		}
 	case <-time.After(timeout):
-		t.Fatalf("timed out waiting for session process to exit\nlogs:\n%s", logs)
+		t.Fatalf("timed out waiting for session process to exit\nlogs:\n%s", readLogFile(logPath))
 	}
+}
+
+func mustTempFile(t *testing.T) *os.File {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "rc-e2e-*.log")
+	if err != nil {
+		t.Fatalf("create temp log file: %v", err)
+	}
+	return f
+}
+
+func readLogFile(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 func killProcess(cmd *exec.Cmd) {
