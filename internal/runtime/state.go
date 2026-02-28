@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/si/remote-control/internal/config"
+	"github.com/Aureuma/remote-control/internal/config"
 )
 
 type SessionState struct {

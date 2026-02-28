@@ -10,7 +10,7 @@ import (
 
 	"github.com/creack/pty"
 
-	"github.com/si/remote-control/internal/tmux"
+	"github.com/Aureuma/remote-control/internal/tmux"
 )
 
 type Mode string

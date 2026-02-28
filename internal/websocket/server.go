@@ -14,7 +14,7 @@ import (
 
 	gws "github.com/gorilla/websocket"
 
-	"github.com/si/remote-control/internal/session"
+	"github.com/Aureuma/remote-control/internal/session"
 )
 
 type Message struct {

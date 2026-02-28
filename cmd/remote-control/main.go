@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/si/remote-control/internal/app"
+	"github.com/Aureuma/remote-control/internal/app"
 )
 
 func main() {
