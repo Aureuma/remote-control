@@ -14,10 +14,14 @@ func TestApplyDefaultsFlowAndTunnel(t *testing.T) {
 		},
 		Tunnel: TunnelSettings{
 			Provider: "",
+			Mode:     "",
 			Cloudflare: CloudflareTunnelSettings{
 				Binary:                "",
 				StartupTimeoutSeconds: 0,
 			},
+		},
+		Security: SecuritySettings{
+			TokenInURL: nil,
 		},
 	}
 	applyDefaults(&s)
@@ -33,11 +37,17 @@ func TestApplyDefaultsFlowAndTunnel(t *testing.T) {
 	if s.Tunnel.Provider != "cloudflare" {
 		t.Fatalf("expected cloudflare provider default, got %q", s.Tunnel.Provider)
 	}
+	if s.Tunnel.Mode != "ephemeral" {
+		t.Fatalf("expected ephemeral tunnel mode default, got %q", s.Tunnel.Mode)
+	}
 	if s.Tunnel.Cloudflare.Binary != "cloudflared" {
 		t.Fatalf("expected cloudflared binary default, got %q", s.Tunnel.Cloudflare.Binary)
 	}
 	if s.Tunnel.Cloudflare.StartupTimeoutSeconds <= 0 {
 		t.Fatalf("expected positive tunnel timeout default")
+	}
+	if s.Security.TokenInURL == nil || !*s.Security.TokenInURL {
+		t.Fatalf("expected token_in_url default true")
 	}
 }
 
@@ -54,6 +64,12 @@ func TestLoadCreatesDefaultSettings(t *testing.T) {
 	}
 	if got.Tunnel.Provider != "cloudflare" {
 		t.Fatalf("expected provider cloudflare, got %q", got.Tunnel.Provider)
+	}
+	if got.Tunnel.Mode != "ephemeral" {
+		t.Fatalf("expected tunnel mode ephemeral, got %q", got.Tunnel.Mode)
+	}
+	if got.Security.TokenInURL == nil || !*got.Security.TokenInURL {
+		t.Fatalf("expected token_in_url default true")
 	}
 	if got.Flow.LowWatermarkBytes <= 0 || got.Flow.HighWatermarkBytes <= 0 {
 		t.Fatalf("expected flow defaults")

@@ -81,3 +81,15 @@ func TestRunAttachRejectsMissingTmuxSession(t *testing.T) {
 		t.Fatalf("Run(attach missing session)=%d want non-zero", got)
 	}
 }
+
+func TestRunAttachRejectsConflictingAttachTargets(t *testing.T) {
+	setTestHome(t)
+	if got := Run([]string{"attach", "--tmux-session", "dev", "--tty-path", "/dev/pts/1", "--no-tunnel"}); got == 0 {
+		t.Fatalf("Run(attach conflicting targets)=%d want non-zero", got)
+	}
+}
+
+func TestRunSessionsAllDoesNotRequireTmux(t *testing.T) {
+	setTestHome(t)
+	_ = Run([]string{"sessions", "--all"})
+}

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Aureuma/remote-control/internal/session"
+	"github.com/creack/pty"
 )
 
 func TestE2EStartStatusStop(t *testing.T) {
@@ -135,6 +136,61 @@ func TestE2EAttachStatusStop(t *testing.T) {
 		t.Fatalf("unexpected stop output:\n%s", stopOut)
 	}
 	waitForProcessExit(t, serverCmd, 10*time.Second, attachLogFile.Name())
+}
+
+func TestE2EAttachTTYStatusStop(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("tty attach e2e unsupported on windows")
+	}
+
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty.Open: %v", err)
+	}
+	defer func() {
+		_ = ptmx.Close()
+		_ = tty.Close()
+	}()
+
+	bin := buildRemoteControlBinaryForTest(t)
+	home := t.TempDir()
+	id := fmt.Sprintf("e2e-tty-%d", time.Now().UnixNano())
+	port := freeLocalPort(t)
+
+	serverCmd := exec.Command(bin,
+		"attach",
+		"--tty-path", tty.Name(),
+		"--bind", "127.0.0.1",
+		"--port", fmt.Sprintf("%d", port),
+		"--id", id,
+		"--no-tunnel",
+		"--no-caffeinate",
+	)
+	serverCmd.Env = append(os.Environ(), "SI_REMOTE_CONTROL_HOME="+home)
+	ttyLogFile := mustTempFile(t)
+	defer func() { _ = ttyLogFile.Close() }()
+	serverCmd.Stdout = ttyLogFile
+	serverCmd.Stderr = ttyLogFile
+	if err := serverCmd.Start(); err != nil {
+		t.Fatalf("start tty attach session: %v", err)
+	}
+	defer killProcess(serverCmd)
+
+	waitForSessionState(t, home, id, 10*time.Second, ttyLogFile.Name())
+
+	statusOut := runRemoteControlCmd(t, bin, home, "status")
+	if !strings.Contains(statusOut, id) {
+		t.Fatalf("status output missing session id %q:\n%s", id, statusOut)
+	}
+	if !strings.Contains(statusOut, "mode=tty") {
+		t.Fatalf("status output missing tty mode:\n%s", statusOut)
+	}
+
+	stopOut := runRemoteControlCmd(t, bin, home, "stop", "--id", id)
+	if !strings.Contains(stopOut, "Stop signal sent") {
+		t.Fatalf("unexpected stop output:\n%s", stopOut)
+	}
+	waitForProcessExit(t, serverCmd, 10*time.Second, ttyLogFile.Name())
 }
 
 func buildRemoteControlBinaryForTest(t *testing.T) string {
