@@ -16,7 +16,7 @@ Implemented scope (Phase 0-5):
 - same-host/origin websocket checks compatible with public tunnel hostnames.
 - regression tests for flow, tunnel URL parsing, token expiry, tmux parsing, and runtime state pruning.
 
-Production hardening in progress:
+Production hardening implemented:
 - named Cloudflare tunnel mode (`--tunnel-mode named`) with custom hostname support.
 - direct existing TTY attach (`attach --tty-path /dev/pts/N`) in addition to tmux attach.
 - optional access-code auth and optional token omission from URL.

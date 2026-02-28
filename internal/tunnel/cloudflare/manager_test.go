@@ -2,6 +2,7 @@ package cloudflare
 
 import (
 	"context"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
@@ -107,12 +108,50 @@ func TestBuildInvocationNamedWithToken(t *testing.T) {
 	}
 }
 
+func TestBuildInvocationNamedTokenWithoutHostname(t *testing.T) {
+	args, publicURL, err := buildInvocation("http://127.0.0.1:8080", Options{
+		Mode:        "named",
+		TunnelToken: "cf-token",
+	})
+	if err != nil {
+		t.Fatalf("buildInvocation named token no hostname: %v", err)
+	}
+	want := []string{"tunnel", "run", "--token", "cf-token"}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("args=%v want %v", args, want)
+	}
+	if publicURL != "" {
+		t.Fatalf("publicURL=%q want empty", publicURL)
+	}
+}
+
 func TestBuildInvocationNamedRequiresHostname(t *testing.T) {
 	_, _, err := buildInvocation("http://127.0.0.1:8080", Options{
 		Mode: "named",
 	})
 	if err == nil {
 		t.Fatalf("expected hostname error")
+	}
+}
+
+func TestWaitForProcessStartupReturnsQuicklyWhenAlive(t *testing.T) {
+	cmd := exec.Command("sleep", "3")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	defer func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}()
+
+	start := time.Now()
+	if err := waitForProcessStartup(context.Background(), cmd, 5*time.Second); err != nil {
+		t.Fatalf("waitForProcessStartup: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("waitForProcessStartup took too long: %s", elapsed)
 	}
 }
 
