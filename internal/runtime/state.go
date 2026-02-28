@@ -15,17 +15,22 @@ import (
 )
 
 type SessionState struct {
-	ID           string    `json:"id"`
-	Mode         string    `json:"mode"`
-	Source       string    `json:"source"`
-	ReadOnly     bool      `json:"readonly"`
-	PID          int       `json:"pid"`
-	Addr         string    `json:"addr"`
-	URL          string    `json:"url"`
-	StartedAt    time.Time `json:"started_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
-	ClientCount  int       `json:"client_count"`
-	SettingsFile string    `json:"settings_file,omitempty"`
+	ID             string    `json:"id"`
+	Mode           string    `json:"mode"`
+	Source         string    `json:"source"`
+	ReadOnly       bool      `json:"readonly"`
+	PID            int       `json:"pid"`
+	Addr           string    `json:"addr"`
+	URL            string    `json:"url"`
+	LocalURL       string    `json:"local_url,omitempty"`
+	PublicURL      string    `json:"public_url,omitempty"`
+	Tunnel         string    `json:"tunnel,omitempty"`
+	CloudflaredPID int       `json:"cloudflared_pid,omitempty"`
+	CaffeinatePID  int       `json:"caffeinate_pid,omitempty"`
+	StartedAt      time.Time `json:"started_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	ClientCount    int       `json:"client_count"`
+	SettingsFile   string    `json:"settings_file,omitempty"`
 }
 
 func SaveSession(state SessionState) error {

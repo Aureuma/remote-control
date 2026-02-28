@@ -20,25 +20,40 @@ import (
 	"github.com/si/remote-control/internal/auth"
 	"github.com/si/remote-control/internal/config"
 	"github.com/si/remote-control/internal/httpui"
+	"github.com/si/remote-control/internal/power/macos"
 	runtimeState "github.com/si/remote-control/internal/runtime"
 	"github.com/si/remote-control/internal/session"
 	"github.com/si/remote-control/internal/tmux"
+	"github.com/si/remote-control/internal/tunnel/cloudflare"
 	ws "github.com/si/remote-control/internal/websocket"
 )
 
 const usageText = `remote-control commands:
   remote-control sessions
-  remote-control attach --tmux-session <name> [--port <n>] [--bind <addr>] [--readwrite]
-  remote-control start --cmd "<command>" [--port <n>] [--bind <addr>] [--readwrite]
+  remote-control attach --tmux-session <name> [--port <n>] [--bind <addr>] [--readwrite] [--tunnel|--no-tunnel]
+  remote-control start --cmd "<command>" [--port <n>] [--bind <addr>] [--readwrite] [--tunnel|--no-tunnel]
   remote-control status
   remote-control stop [--id <session-id>]
 `
 
 type launchOptions struct {
-	id       string
-	bind     string
-	port     int
-	readonly bool
+	id                string
+	bind              string
+	port              int
+	readonly          bool
+	maxClients        int
+	flowLowBytes      int64
+	flowHighBytes     int64
+	enableTunnel      bool
+	tunnelRequired    bool
+	cloudflaredBinary string
+	cloudflareTimeout time.Duration
+	enableCaffeinate  bool
+}
+
+type managedProcess interface {
+	PID() int
+	Stop() error
 }
 
 func Run(args []string) int {
@@ -100,6 +115,12 @@ func cmdAttach(settings config.Settings, args []string) int {
 	bind := fs.String("bind", settings.Server.Bind, "server bind address")
 	port := fs.Int("port", settings.Server.Port, "server port")
 	readwrite := fs.Bool("readwrite", !settings.Security.ReadOnlyDefault, "enable remote typing")
+	tunnel := fs.Bool("tunnel", settings.Tunnel.Enabled, "start public tunnel")
+	noTunnel := fs.Bool("no-tunnel", false, "disable public tunnel")
+	tunnelRequired := fs.Bool("tunnel-required", settings.Tunnel.Required, "fail if tunnel cannot start")
+	cloudflaredBin := fs.String("cloudflared-bin", settings.Tunnel.Cloudflare.Binary, "cloudflared binary path")
+	caffeinate := fs.Bool("caffeinate", settings.MacOS.Caffeinate, "prevent macOS sleep while active")
+	noCaffeinate := fs.Bool("no-caffeinate", false, "disable caffeinate even if enabled in settings")
 	sessionID := fs.String("id", "", "runtime session id")
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -126,10 +147,18 @@ func cmdAttach(settings config.Settings, args []string) int {
 	}
 	defer term.Close()
 	opts := launchOptions{
-		id:       strings.TrimSpace(*sessionID),
-		bind:     strings.TrimSpace(*bind),
-		port:     *port,
-		readonly: !*readwrite,
+		id:                strings.TrimSpace(*sessionID),
+		bind:              strings.TrimSpace(*bind),
+		port:              *port,
+		readonly:          !*readwrite,
+		maxClients:        settings.Session.MaxClients,
+		flowLowBytes:      settings.Flow.LowWatermarkBytes,
+		flowHighBytes:     settings.Flow.HighWatermarkBytes,
+		enableTunnel:      *tunnel && !*noTunnel,
+		tunnelRequired:    *tunnelRequired,
+		cloudflaredBinary: strings.TrimSpace(*cloudflaredBin),
+		cloudflareTimeout: time.Duration(settings.Tunnel.Cloudflare.StartupTimeoutSeconds) * time.Second,
+		enableCaffeinate:  *caffeinate && !*noCaffeinate,
 	}
 	return runServer(term, opts)
 }
@@ -142,6 +171,12 @@ func cmdStart(settings config.Settings, args []string) int {
 	bind := fs.String("bind", settings.Server.Bind, "server bind address")
 	port := fs.Int("port", settings.Server.Port, "server port")
 	readwrite := fs.Bool("readwrite", !settings.Security.ReadOnlyDefault, "enable remote typing")
+	tunnel := fs.Bool("tunnel", settings.Tunnel.Enabled, "start public tunnel")
+	noTunnel := fs.Bool("no-tunnel", false, "disable public tunnel")
+	tunnelRequired := fs.Bool("tunnel-required", settings.Tunnel.Required, "fail if tunnel cannot start")
+	cloudflaredBin := fs.String("cloudflared-bin", settings.Tunnel.Cloudflare.Binary, "cloudflared binary path")
+	caffeinate := fs.Bool("caffeinate", settings.MacOS.Caffeinate, "prevent macOS sleep while active")
+	noCaffeinate := fs.Bool("no-caffeinate", false, "disable caffeinate even if enabled in settings")
 	sessionID := fs.String("id", "", "runtime session id")
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -158,10 +193,18 @@ func cmdStart(settings config.Settings, args []string) int {
 	}
 	defer term.Close()
 	opts := launchOptions{
-		id:       strings.TrimSpace(*sessionID),
-		bind:     strings.TrimSpace(*bind),
-		port:     *port,
-		readonly: !*readwrite,
+		id:                strings.TrimSpace(*sessionID),
+		bind:              strings.TrimSpace(*bind),
+		port:              *port,
+		readonly:          !*readwrite,
+		maxClients:        settings.Session.MaxClients,
+		flowLowBytes:      settings.Flow.LowWatermarkBytes,
+		flowHighBytes:     settings.Flow.HighWatermarkBytes,
+		enableTunnel:      *tunnel && !*noTunnel,
+		tunnelRequired:    *tunnelRequired,
+		cloudflaredBinary: strings.TrimSpace(*cloudflaredBin),
+		cloudflareTimeout: time.Duration(settings.Tunnel.Cloudflare.StartupTimeoutSeconds) * time.Second,
+		enableCaffeinate:  *caffeinate && !*noCaffeinate,
 	}
 	return runServer(term, opts)
 }
@@ -188,21 +231,29 @@ func runServer(term *session.Terminal, opts launchOptions) int {
 		return 1
 	}
 	addr := fmt.Sprintf("%s:%d", opts.bind, opts.port)
-	publicURL := fmt.Sprintf("http://%s/?token=%s", addr, token)
+	localURL := fmt.Sprintf("http://%s/", addr)
+	shareURL := appendToken(localURL, token)
 	settingsPath, _ := config.SettingsPath()
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
 
 	var stateMu sync.Mutex
 	state := runtimeState.SessionState{
-		ID:           id,
-		Mode:         string(term.Mode()),
-		Source:       term.Source(),
-		ReadOnly:     opts.readonly,
-		PID:          os.Getpid(),
-		Addr:         addr,
-		URL:          fmt.Sprintf("http://%s/", addr),
-		StartedAt:    time.Now().UTC(),
-		ClientCount:  0,
-		SettingsFile: settingsPath,
+		ID:             id,
+		Mode:           string(term.Mode()),
+		Source:         term.Source(),
+		ReadOnly:       opts.readonly,
+		PID:            os.Getpid(),
+		Addr:           addr,
+		URL:            localURL,
+		LocalURL:       localURL,
+		PublicURL:      "",
+		Tunnel:         "local",
+		StartedAt:      time.Now().UTC(),
+		ClientCount:    0,
+		SettingsFile:   settingsPath,
+		CloudflaredPID: 0,
+		CaffeinatePID:  0,
 	}
 	if err := runtimeState.SaveSession(state); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠️ Could not persist runtime state: %v\n", err)
@@ -213,9 +264,9 @@ func runServer(term *session.Terminal, opts launchOptions) int {
 
 	bridge := ws.New(term, token, ws.ServerOptions{
 		ReadOnly:           opts.readonly,
-		MaxClients:         1,
-		LowWatermarkBytes:  512 * 1024,
-		HighWatermarkBytes: 2 * 1024 * 1024,
+		MaxClients:         opts.maxClients,
+		LowWatermarkBytes:  opts.flowLowBytes,
+		HighWatermarkBytes: opts.flowHighBytes,
 		PingInterval:       25 * time.Second,
 		ClientReadTimeout:  90 * time.Second,
 		OnClientCountChange: func(count int) {
@@ -264,9 +315,67 @@ func runServer(term *session.Terminal, opts launchOptions) int {
 		eventCh <- runtimeEvent{source: "terminal", err: term.Wait()}
 	}()
 
+	var managed []managedProcess
+	defer func() {
+		for i := len(managed) - 1; i >= 0; i-- {
+			_ = managed[i].Stop()
+		}
+	}()
+
+	if opts.enableTunnel {
+		if err := waitForLocalHealth(runCtx, strings.TrimRight(localURL, "/")+"/healthz", 5*time.Second); err != nil {
+			if opts.tunnelRequired {
+				fmt.Fprintf(os.Stderr, "❌ Local server did not become ready for tunnel startup: %v\n", err)
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "⚠️ Tunnel skipped because local server readiness check failed: %v\n", err)
+		} else {
+			tunnelHandle, err := cloudflare.Start(runCtx, cloudflare.Options{
+				Binary:         opts.cloudflaredBinary,
+				LocalURL:       strings.TrimRight(localURL, "/"),
+				StartupTimeout: opts.cloudflareTimeout,
+			})
+			if err != nil {
+				if opts.tunnelRequired {
+					fmt.Fprintf(os.Stderr, "❌ Tunnel startup failed: %v\n", err)
+					return 1
+				}
+				fmt.Fprintf(os.Stderr, "⚠️ Tunnel unavailable; continuing in local mode: %v\n", err)
+			} else {
+				managed = append(managed, tunnelHandle)
+				publicBase := strings.TrimSpace(tunnelHandle.PublicURL())
+				shareURL = appendToken(publicBase, token)
+				stateMu.Lock()
+				state.Tunnel = "cloudflare"
+				state.PublicURL = publicBase
+				state.URL = publicBase
+				state.CloudflaredPID = tunnelHandle.PID()
+				_ = runtimeState.SaveSession(state)
+				stateMu.Unlock()
+			}
+		}
+	}
+
+	if opts.enableCaffeinate {
+		caffeinateHandle, err := macos.Start(runCtx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️ Could not start caffeinate: %v\n", err)
+		} else if caffeinateHandle != nil {
+			managed = append(managed, caffeinateHandle)
+			stateMu.Lock()
+			state.CaffeinatePID = caffeinateHandle.PID()
+			_ = runtimeState.SaveSession(state)
+			stateMu.Unlock()
+		}
+	}
+
 	fmt.Println("✅ SI remote-control is live")
 	fmt.Printf("🆔 Session ID: %s\n", id)
-	fmt.Printf("📡 URL: %s\n", publicURL)
+	fmt.Printf("🌐 Share URL: %s\n", shareURL)
+	fmt.Printf("🏠 Local URL: %s\n", localURL)
+	if strings.TrimSpace(state.PublicURL) != "" {
+		fmt.Printf("☁️  Tunnel URL: %s\n", state.PublicURL)
+	}
 	if opts.readonly {
 		fmt.Println("🔒 Mode: read-only")
 	} else {
@@ -322,8 +431,16 @@ func cmdStatus() int {
 		if runtimeState.ProcessAlive(st.PID) {
 			status = "running"
 		}
-		fmt.Printf("- %s [%s] mode=%s readonly=%t clients=%d addr=%s started=%s\n",
-			st.ID, status, st.Mode, st.ReadOnly, st.ClientCount, st.Addr, st.StartedAt.Local().Format(time.RFC3339))
+		local := strings.TrimSpace(st.LocalURL)
+		if local == "" {
+			local = strings.TrimSpace(st.URL)
+		}
+		public := strings.TrimSpace(st.PublicURL)
+		if public == "" {
+			public = "-"
+		}
+		fmt.Printf("- %s [%s] mode=%s readonly=%t clients=%d local=%s public=%s started=%s pids(parent=%d cf=%d caf=%d)\n",
+			st.ID, status, st.Mode, st.ReadOnly, st.ClientCount, local, public, st.StartedAt.Local().Format(time.RFC3339), st.PID, st.CloudflaredPID, st.CaffeinatePID)
 	}
 	return 0
 }
@@ -379,6 +496,12 @@ func cmdStop(args []string) int {
 		fmt.Fprintf(os.Stderr, "❌ Could not stop session %s: %v\n", target.ID, err)
 		return 1
 	}
+	if target.CloudflaredPID > 0 && target.CloudflaredPID != target.PID {
+		_ = terminatePID(target.CloudflaredPID, syscall.SIGTERM)
+	}
+	if target.CaffeinatePID > 0 && target.CaffeinatePID != target.PID {
+		_ = terminatePID(target.CaffeinatePID, syscall.SIGTERM)
+	}
 	fmt.Printf("✅ Stop signal sent to %s (pid %d)\n", target.ID, target.PID)
 	return 0
 }
@@ -393,6 +516,54 @@ func RepoRoot() (string, error) {
 		return "", err
 	}
 	return filepath.Dir(exe), nil
+}
+
+func waitForLocalHealth(ctx context.Context, healthURL string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	client := &http.Client{Timeout: 1500 * time.Millisecond}
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
+		if err == nil {
+			resp, reqErr := client.Do(req)
+			if reqErr == nil {
+				_ = resp.Body.Close()
+				if resp.StatusCode >= 200 && resp.StatusCode < 500 {
+					return nil
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for %s", healthURL)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(150 * time.Millisecond):
+		}
+	}
+}
+
+func appendToken(baseURL, token string) string {
+	base := strings.TrimSpace(baseURL)
+	if base == "" {
+		return ""
+	}
+	base = strings.TrimRight(base, "/")
+	return base + "/?token=" + token
+}
+
+func terminatePID(pid int, sig syscall.Signal) error {
+	if pid <= 0 {
+		return nil
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return proc.Signal(sig)
 }
 
 func pruneStaleRuntimeState() {
