@@ -28,6 +28,9 @@ type SessionState struct {
 	CloudflaredPID int       `json:"cloudflared_pid,omitempty"`
 	CaffeinatePID  int       `json:"caffeinate_pid,omitempty"`
 	StartedAt      time.Time `json:"started_at"`
+	TokenExpiresAt time.Time `json:"token_expires_at,omitempty"`
+	IdleTimeoutSec int       `json:"idle_timeout_seconds,omitempty"`
+	IdleDeadline   time.Time `json:"idle_deadline,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at"`
 	ClientCount    int       `json:"client_count"`
 	SettingsFile   string    `json:"settings_file,omitempty"`
