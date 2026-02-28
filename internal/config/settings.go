@@ -14,6 +14,8 @@ type Settings struct {
 	SchemaVersion int              `toml:"schema_version"`
 	Server        ServerSettings   `toml:"server"`
 	Session       SessionSettings  `toml:"session"`
+	Flow          FlowSettings     `toml:"flow"`
+	Tunnel        TunnelSettings   `toml:"tunnel"`
 	Security      SecuritySettings `toml:"security"`
 	UI            UISettings       `toml:"ui"`
 	Logging       LoggingSettings  `toml:"logging"`
@@ -31,6 +33,25 @@ type SessionSettings struct {
 	TokenTTLSeconds    int    `toml:"token_ttl_seconds"`
 	IdleTimeoutSeconds int    `toml:"idle_timeout_seconds"`
 	MaxClients         int    `toml:"max_clients"`
+}
+
+type FlowSettings struct {
+	LowWatermarkBytes  int64 `toml:"low_watermark_bytes"`
+	HighWatermarkBytes int64 `toml:"high_watermark_bytes"`
+	AckQuantumBytes    int64 `toml:"ack_quantum_bytes"`
+}
+
+type TunnelSettings struct {
+	Enabled    bool                     `toml:"enabled"`
+	Provider   string                   `toml:"provider"`
+	Required   bool                     `toml:"required"`
+	Cloudflare CloudflareTunnelSettings `toml:"cloudflare"`
+}
+
+type CloudflareTunnelSettings struct {
+	Enabled               bool   `toml:"enabled"`
+	Binary                string `toml:"binary"`
+	StartupTimeoutSeconds int    `toml:"startup_timeout_seconds"`
 }
 
 type SecuritySettings struct {
@@ -68,6 +89,21 @@ func defaultSettings() Settings {
 			IdleTimeoutSeconds: 900,
 			MaxClients:         1,
 		},
+		Flow: FlowSettings{
+			LowWatermarkBytes:  512 * 1024,
+			HighWatermarkBytes: 2 * 1024 * 1024,
+			AckQuantumBytes:    256 * 1024,
+		},
+		Tunnel: TunnelSettings{
+			Enabled:  true,
+			Provider: "cloudflare",
+			Required: false,
+			Cloudflare: CloudflareTunnelSettings{
+				Enabled:               true,
+				Binary:                "cloudflared",
+				StartupTimeoutSeconds: 20,
+			},
+		},
 		Security: SecuritySettings{
 			ReadOnlyDefault: true,
 			MaskTokensInLog: true,
@@ -104,6 +140,32 @@ func applyDefaults(s *Settings) {
 	}
 	if s.Session.MaxClients <= 0 {
 		s.Session.MaxClients = 1
+	}
+	if s.Flow.LowWatermarkBytes <= 0 {
+		s.Flow.LowWatermarkBytes = 512 * 1024
+	}
+	if s.Flow.HighWatermarkBytes <= 0 {
+		s.Flow.HighWatermarkBytes = 2 * 1024 * 1024
+	}
+	if s.Flow.LowWatermarkBytes > s.Flow.HighWatermarkBytes {
+		s.Flow.LowWatermarkBytes = s.Flow.HighWatermarkBytes / 2
+		if s.Flow.LowWatermarkBytes <= 0 {
+			s.Flow.LowWatermarkBytes = 1
+		}
+	}
+	if s.Flow.AckQuantumBytes <= 0 {
+		s.Flow.AckQuantumBytes = 256 * 1024
+	}
+	s.Tunnel.Provider = strings.TrimSpace(strings.ToLower(s.Tunnel.Provider))
+	if s.Tunnel.Provider == "" {
+		s.Tunnel.Provider = "cloudflare"
+	}
+	s.Tunnel.Cloudflare.Binary = strings.TrimSpace(s.Tunnel.Cloudflare.Binary)
+	if s.Tunnel.Cloudflare.Binary == "" {
+		s.Tunnel.Cloudflare.Binary = "cloudflared"
+	}
+	if s.Tunnel.Cloudflare.StartupTimeoutSeconds <= 0 {
+		s.Tunnel.Cloudflare.StartupTimeoutSeconds = 20
 	}
 	s.Logging.Level = strings.TrimSpace(strings.ToLower(s.Logging.Level))
 	if s.Logging.Level == "" {
