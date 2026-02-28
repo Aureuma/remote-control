@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -24,13 +25,14 @@ import (
 	runtimeState "github.com/Aureuma/remote-control/internal/runtime"
 	"github.com/Aureuma/remote-control/internal/session"
 	"github.com/Aureuma/remote-control/internal/tmux"
+	"github.com/Aureuma/remote-control/internal/ttydiscover"
 	"github.com/Aureuma/remote-control/internal/tunnel/cloudflare"
 	ws "github.com/Aureuma/remote-control/internal/websocket"
 )
 
 const usageText = `remote-control commands:
-  remote-control sessions
-  remote-control attach --tmux-session <name> [--port <n>] [--bind <addr>] [--readwrite] [--tunnel|--no-tunnel]
+  remote-control sessions [--all]
+  remote-control attach [--tmux-session <name> | --tty-path <path>] [--port <n>] [--bind <addr>] [--readwrite] [--tunnel|--no-tunnel]
   remote-control start --cmd "<command>" [--port <n>] [--bind <addr>] [--readwrite] [--tunnel|--no-tunnel]
   remote-control status
   remote-control stop [--id <session-id>]
@@ -51,7 +53,15 @@ type launchOptions struct {
 	tunnelRequired    bool
 	cloudflaredBinary string
 	cloudflareTimeout time.Duration
+	tunnelMode        string
+	tunnelHostname    string
+	tunnelName        string
+	tunnelToken       string
+	tunnelConfigFile  string
+	tunnelCredFile    string
 	enableCaffeinate  bool
+	accessCode        string
+	tokenInURL        bool
 }
 
 type managedProcess interface {
@@ -73,7 +83,7 @@ func Run(args []string) int {
 	rest := args[1:]
 	switch sub {
 	case "sessions":
-		return cmdSessions()
+		return cmdSessions(rest)
 	case "attach":
 		return cmdAttach(settings, rest)
 	case "start", "run":
@@ -92,39 +102,10 @@ func Run(args []string) int {
 	}
 }
 
-func cmdSessions() int {
-	sessions, err := tmux.ListSessions()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Could not list tmux sessions: %v\n", err)
-		return 1
-	}
-	if len(sessions) == 0 {
-		fmt.Println("ℹ️ No tmux sessions found.")
-		return 0
-	}
-	sort.Slice(sessions, func(i, j int) bool { return sessions[i].Name < sessions[j].Name })
-	fmt.Println("🧭 Available tmux sessions")
-	for _, s := range sessions {
-		fmt.Printf("- %s (windows=%d, attached=%d, created=%s)\n", s.Name, s.Windows, s.Attached, s.Created)
-	}
-	return 0
-}
-
-func cmdAttach(settings config.Settings, args []string) int {
-	pruneStaleRuntimeState()
-	fs := flag.NewFlagSet("attach", flag.ContinueOnError)
+func cmdSessions(args []string) int {
+	fs := flag.NewFlagSet("sessions", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	tmuxSession := fs.String("tmux-session", "", "tmux session name")
-	bind := fs.String("bind", settings.Server.Bind, "server bind address")
-	port := fs.Int("port", settings.Server.Port, "server port")
-	readwrite := fs.Bool("readwrite", !settings.Security.ReadOnlyDefault, "enable remote typing")
-	tunnel := fs.Bool("tunnel", settings.Tunnel.Enabled, "start public tunnel")
-	noTunnel := fs.Bool("no-tunnel", false, "disable public tunnel")
-	tunnelRequired := fs.Bool("tunnel-required", settings.Tunnel.Required, "fail if tunnel cannot start")
-	cloudflaredBin := fs.String("cloudflared-bin", settings.Tunnel.Cloudflare.Binary, "cloudflared binary path")
-	caffeinate := fs.Bool("caffeinate", settings.MacOS.Caffeinate, "prevent macOS sleep while active")
-	noCaffeinate := fs.Bool("no-caffeinate", false, "disable caffeinate even if enabled in settings")
-	sessionID := fs.String("id", "", "runtime session id")
+	all := fs.Bool("all", false, "include direct TTY process candidates")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -132,41 +113,137 @@ func cmdAttach(settings config.Settings, args []string) int {
 		return 1
 	}
 
-	name := strings.TrimSpace(*tmuxSession)
-	list, err := tmux.ListSessions()
+	exitCode := 0
+	sessions, err := tmux.ListSessions()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Could not discover tmux sessions: %v\n", err)
-		return 1
-	}
-	if len(list) == 0 {
-		fmt.Fprintln(os.Stderr, "❌ No tmux sessions found. Start one with: tmux new -s my-session")
-		return 1
-	}
-	if name == "" {
-		name = list[0].Name
-		fmt.Printf("ℹ️ Using tmux session: %s\n", name)
-	} else {
-		found := false
-		for _, s := range list {
-			if s.Name == name {
-				found = true
-				break
-			}
-		}
-		if !found {
-			names := make([]string, 0, len(list))
-			for _, s := range list {
-				names = append(names, s.Name)
-			}
-			sort.Strings(names)
-			fmt.Fprintf(os.Stderr, "❌ tmux session %q not found. Available: %s\n", name, strings.Join(names, ", "))
+		if !*all {
+			fmt.Fprintf(os.Stderr, "❌ Could not list tmux sessions: %v\n", err)
 			return 1
 		}
+		fmt.Fprintf(os.Stderr, "⚠️ Could not list tmux sessions: %v\n", err)
 	}
-	term, err := session.StartAttach(name)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Could not attach tmux session %q: %v\n", name, err)
+
+	if len(sessions) == 0 {
+		fmt.Println("ℹ️ No tmux sessions found.")
+	} else {
+		sort.Slice(sessions, func(i, j int) bool { return sessions[i].Name < sessions[j].Name })
+		fmt.Println("🧭 Available tmux sessions")
+		for _, s := range sessions {
+			fmt.Printf("- %s (windows=%d, attached=%d, created=%s)\n", s.Name, s.Windows, s.Attached, s.Created)
+		}
+	}
+	if !*all {
+		return exitCode
+	}
+
+	candidates, ttyErr := ttydiscover.List()
+	if ttyErr != nil {
+		fmt.Fprintf(os.Stderr, "⚠️ Could not discover TTY candidates: %v\n", ttyErr)
+		if exitCode == 0 {
+			exitCode = 1
+		}
+		return exitCode
+	}
+	if len(candidates) == 0 {
+		fmt.Println("ℹ️ No direct TTY candidates found.")
+		return exitCode
+	}
+	fmt.Println("🔎 Direct TTY candidates")
+	for _, c := range candidates {
+		fmt.Printf("- pid=%d tty=%s cmd=%s args=%s\n", c.PID, c.TTY, c.Command, strings.TrimSpace(c.Args))
+	}
+	return exitCode
+}
+
+func cmdAttach(settings config.Settings, args []string) int {
+	pruneStaleRuntimeState()
+	fs := flag.NewFlagSet("attach", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	tmuxSession := fs.String("tmux-session", "", "tmux session name")
+	ttyPath := fs.String("tty-path", "", "direct tty path (example: /dev/pts/3)")
+	bind := fs.String("bind", settings.Server.Bind, "server bind address")
+	port := fs.Int("port", settings.Server.Port, "server port")
+	readwrite := fs.Bool("readwrite", !settings.Security.ReadOnlyDefault, "enable remote typing")
+	tunnel := fs.Bool("tunnel", settings.Tunnel.Enabled, "start public tunnel")
+	noTunnel := fs.Bool("no-tunnel", false, "disable public tunnel")
+	tunnelRequired := fs.Bool("tunnel-required", settings.Tunnel.Required, "fail if tunnel cannot start")
+	cloudflaredBin := fs.String("cloudflared-bin", settings.Tunnel.Cloudflare.Binary, "cloudflared binary path")
+	tunnelMode := fs.String("tunnel-mode", settings.Tunnel.Mode, "cloudflare tunnel mode (ephemeral|named)")
+	tunnelHostname := fs.String("tunnel-hostname", settings.Tunnel.Named.Hostname, "named tunnel hostname")
+	tunnelName := fs.String("tunnel-name", settings.Tunnel.Named.TunnelName, "named tunnel name")
+	tunnelToken := fs.String("tunnel-token", settings.Tunnel.Named.TunnelToken, "named tunnel token")
+	tunnelConfigFile := fs.String("cloudflared-config", settings.Tunnel.Named.ConfigFile, "cloudflared config file path")
+	tunnelCredFile := fs.String("cloudflared-credentials", settings.Tunnel.Named.CredentialsFile, "cloudflared credentials file path")
+	caffeinate := fs.Bool("caffeinate", settings.MacOS.Caffeinate, "prevent macOS sleep while active")
+	noCaffeinate := fs.Bool("no-caffeinate", false, "disable caffeinate even if enabled in settings")
+	accessCode := fs.String("access-code", settings.Security.AccessCode, "optional extra access code required in browser auth")
+	tokenInURLDefault := true
+	if settings.Security.TokenInURL != nil {
+		tokenInURLDefault = *settings.Security.TokenInURL
+	}
+	tokenInURL := fs.Bool("token-in-url", tokenInURLDefault, "embed access token in share URL")
+	noTokenInURL := fs.Bool("no-token-in-url", false, "do not embed access token in share URL")
+	sessionID := fs.String("id", "", "runtime session id")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
+	}
+	tty := strings.TrimSpace(*ttyPath)
+	name := strings.TrimSpace(*tmuxSession)
+	if tty != "" && name != "" {
+		fmt.Fprintln(os.Stderr, "❌ Choose either --tmux-session or --tty-path, not both.")
+		return 1
+	}
+
+	var (
+		term *session.Terminal
+		err  error
+	)
+	if tty != "" {
+		term, err = session.StartTTYPath(tty)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Could not attach tty path %q: %v\n", tty, err)
+			return 1
+		}
+		fmt.Printf("ℹ️ Using tty path: %s\n", tty)
+	} else {
+		list, listErr := tmux.ListSessions()
+		if listErr != nil {
+			fmt.Fprintf(os.Stderr, "❌ Could not discover tmux sessions: %v\n", listErr)
+			return 1
+		}
+		if len(list) == 0 {
+			fmt.Fprintln(os.Stderr, "❌ No tmux sessions found. Start one with: tmux new -s my-session")
+			return 1
+		}
+		if name == "" {
+			name = list[0].Name
+			fmt.Printf("ℹ️ Using tmux session: %s\n", name)
+		} else {
+			found := false
+			for _, s := range list {
+				if s.Name == name {
+					found = true
+					break
+				}
+			}
+			if !found {
+				names := make([]string, 0, len(list))
+				for _, s := range list {
+					names = append(names, s.Name)
+				}
+				sort.Strings(names)
+				fmt.Fprintf(os.Stderr, "❌ tmux session %q not found. Available: %s\n", name, strings.Join(names, ", "))
+				return 1
+			}
+		}
+		term, err = session.StartAttach(name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Could not attach tmux session %q: %v\n", name, err)
+			return 1
+		}
 	}
 	defer term.Close()
 	opts := launchOptions{
@@ -184,7 +261,15 @@ func cmdAttach(settings config.Settings, args []string) int {
 		tunnelRequired:    *tunnelRequired,
 		cloudflaredBinary: strings.TrimSpace(*cloudflaredBin),
 		cloudflareTimeout: time.Duration(settings.Tunnel.Cloudflare.StartupTimeoutSeconds) * time.Second,
+		tunnelMode:        strings.TrimSpace(*tunnelMode),
+		tunnelHostname:    strings.TrimSpace(*tunnelHostname),
+		tunnelName:        strings.TrimSpace(*tunnelName),
+		tunnelToken:       strings.TrimSpace(*tunnelToken),
+		tunnelConfigFile:  strings.TrimSpace(*tunnelConfigFile),
+		tunnelCredFile:    strings.TrimSpace(*tunnelCredFile),
 		enableCaffeinate:  *caffeinate && !*noCaffeinate,
+		accessCode:        strings.TrimSpace(*accessCode),
+		tokenInURL:        *tokenInURL && !*noTokenInURL,
 	}
 	return runServer(term, opts)
 }
@@ -201,8 +286,21 @@ func cmdStart(settings config.Settings, args []string) int {
 	noTunnel := fs.Bool("no-tunnel", false, "disable public tunnel")
 	tunnelRequired := fs.Bool("tunnel-required", settings.Tunnel.Required, "fail if tunnel cannot start")
 	cloudflaredBin := fs.String("cloudflared-bin", settings.Tunnel.Cloudflare.Binary, "cloudflared binary path")
+	tunnelMode := fs.String("tunnel-mode", settings.Tunnel.Mode, "cloudflare tunnel mode (ephemeral|named)")
+	tunnelHostname := fs.String("tunnel-hostname", settings.Tunnel.Named.Hostname, "named tunnel hostname")
+	tunnelName := fs.String("tunnel-name", settings.Tunnel.Named.TunnelName, "named tunnel name")
+	tunnelToken := fs.String("tunnel-token", settings.Tunnel.Named.TunnelToken, "named tunnel token")
+	tunnelConfigFile := fs.String("cloudflared-config", settings.Tunnel.Named.ConfigFile, "cloudflared config file path")
+	tunnelCredFile := fs.String("cloudflared-credentials", settings.Tunnel.Named.CredentialsFile, "cloudflared credentials file path")
 	caffeinate := fs.Bool("caffeinate", settings.MacOS.Caffeinate, "prevent macOS sleep while active")
 	noCaffeinate := fs.Bool("no-caffeinate", false, "disable caffeinate even if enabled in settings")
+	accessCode := fs.String("access-code", settings.Security.AccessCode, "optional extra access code required in browser auth")
+	tokenInURLDefault := true
+	if settings.Security.TokenInURL != nil {
+		tokenInURLDefault = *settings.Security.TokenInURL
+	}
+	tokenInURL := fs.Bool("token-in-url", tokenInURLDefault, "embed access token in share URL")
+	noTokenInURL := fs.Bool("no-token-in-url", false, "do not embed access token in share URL")
 	sessionID := fs.String("id", "", "runtime session id")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -236,7 +334,15 @@ func cmdStart(settings config.Settings, args []string) int {
 		tunnelRequired:    *tunnelRequired,
 		cloudflaredBinary: strings.TrimSpace(*cloudflaredBin),
 		cloudflareTimeout: time.Duration(settings.Tunnel.Cloudflare.StartupTimeoutSeconds) * time.Second,
+		tunnelMode:        strings.TrimSpace(*tunnelMode),
+		tunnelHostname:    strings.TrimSpace(*tunnelHostname),
+		tunnelName:        strings.TrimSpace(*tunnelName),
+		tunnelToken:       strings.TrimSpace(*tunnelToken),
+		tunnelConfigFile:  strings.TrimSpace(*tunnelConfigFile),
+		tunnelCredFile:    strings.TrimSpace(*tunnelCredFile),
 		enableCaffeinate:  *caffeinate && !*noCaffeinate,
+		accessCode:        strings.TrimSpace(*accessCode),
+		tokenInURL:        *tokenInURL && !*noTokenInURL,
 	}
 	return runServer(term, opts)
 }
@@ -265,7 +371,8 @@ func runServer(term *session.Terminal, opts launchOptions) int {
 	token := issuedToken.Value
 	addr := fmt.Sprintf("%s:%d", opts.bind, opts.port)
 	localURL := fmt.Sprintf("http://%s/", addr)
-	shareURL := appendToken(localURL, token)
+	requireCode := strings.TrimSpace(opts.accessCode) != ""
+	shareURL := buildShareURL(localURL, token, opts.tokenInURL, requireCode)
 	settingsPath, _ := config.SettingsPath()
 	runCtx, runCancel := context.WithCancel(context.Background())
 	defer runCancel()
@@ -285,6 +392,9 @@ func runServer(term *session.Terminal, opts launchOptions) int {
 		StartedAt:      time.Now().UTC(),
 		TokenExpiresAt: issuedToken.ExpiresAt,
 		IdleTimeoutSec: int(opts.idleTimeout / time.Second),
+		TunnelMode:     normalizeTunnelMode(opts.tunnelMode),
+		TokenInURL:     opts.tokenInURL,
+		AccessCodeAuth: requireCode,
 		ClientCount:    0,
 		SettingsFile:   settingsPath,
 		CloudflaredPID: 0,
@@ -307,6 +417,7 @@ func runServer(term *session.Terminal, opts launchOptions) int {
 		HighWatermarkBytes: opts.flowHighBytes,
 		AckQuantumBytes:    opts.flowAckBytes,
 		TokenExpiresAt:     issuedToken.ExpiresAt,
+		AccessCode:         opts.accessCode,
 		PingInterval:       25 * time.Second,
 		ClientReadTimeout:  90 * time.Second,
 		OnClientCountChange: func(count int) {
@@ -405,9 +516,15 @@ func runServer(term *session.Terminal, opts launchOptions) int {
 			fmt.Fprintf(os.Stderr, "⚠️ Tunnel skipped because local server readiness check failed: %v\n", err)
 		} else {
 			tunnelHandle, err := cloudflare.Start(runCtx, cloudflare.Options{
-				Binary:         opts.cloudflaredBinary,
-				LocalURL:       strings.TrimRight(localURL, "/"),
-				StartupTimeout: opts.cloudflareTimeout,
+				Binary:          opts.cloudflaredBinary,
+				LocalURL:        strings.TrimRight(localURL, "/"),
+				StartupTimeout:  opts.cloudflareTimeout,
+				Mode:            opts.tunnelMode,
+				Hostname:        opts.tunnelHostname,
+				TunnelName:      opts.tunnelName,
+				TunnelToken:     opts.tunnelToken,
+				ConfigFile:      opts.tunnelConfigFile,
+				CredentialsFile: opts.tunnelCredFile,
 			})
 			if err != nil {
 				if opts.tunnelRequired {
@@ -418,9 +535,9 @@ func runServer(term *session.Terminal, opts launchOptions) int {
 			} else {
 				managed = append(managed, tunnelHandle)
 				publicBase := strings.TrimSpace(tunnelHandle.PublicURL())
-				shareURL = appendToken(publicBase, token)
+				shareURL = buildShareURL(publicBase, token, opts.tokenInURL, requireCode)
 				stateMu.Lock()
-				state.Tunnel = "cloudflare"
+				state.Tunnel = "cloudflare-" + normalizeTunnelMode(opts.tunnelMode)
 				state.PublicURL = publicBase
 				state.URL = publicBase
 				state.CloudflaredPID = tunnelHandle.PID()
@@ -447,6 +564,12 @@ func runServer(term *session.Terminal, opts launchOptions) int {
 	fmt.Printf("🆔 Session ID: %s\n", id)
 	fmt.Printf("🌐 Share URL: %s\n", shareURL)
 	fmt.Printf("🏠 Local URL: %s\n", localURL)
+	if !opts.tokenInURL {
+		fmt.Printf("🔑 Access Token: %s\n", token)
+	}
+	if requireCode {
+		fmt.Printf("🔐 Access Code: %s\n", opts.accessCode)
+	}
 	fmt.Printf("⏳ Token expires: %s\n", issuedToken.ExpiresAt.Local().Format(time.RFC3339))
 	if strings.TrimSpace(state.PublicURL) != "" {
 		fmt.Printf("☁️  Tunnel URL: %s\n", state.PublicURL)
@@ -529,8 +652,12 @@ func cmdStatus() int {
 		if !st.IdleDeadline.IsZero() {
 			idleDeadline = st.IdleDeadline.Local().Format(time.RFC3339)
 		}
-		fmt.Printf("- %s [%s] mode=%s readonly=%t clients=%d local=%s public=%s started=%s token_expires=%s idle_deadline=%s pids(parent=%d cf=%d caf=%d)\n",
-			st.ID, status, st.Mode, st.ReadOnly, st.ClientCount, local, public, st.StartedAt.Local().Format(time.RFC3339), tokenExpiry, idleDeadline, st.PID, st.CloudflaredPID, st.CaffeinatePID)
+		tunnelMode := strings.TrimSpace(st.TunnelMode)
+		if tunnelMode == "" {
+			tunnelMode = "-"
+		}
+		fmt.Printf("- %s [%s] mode=%s readonly=%t code_auth=%t token_in_url=%t clients=%d local=%s public=%s tunnel_mode=%s started=%s token_expires=%s idle_deadline=%s pids(parent=%d cf=%d caf=%d)\n",
+			st.ID, status, st.Mode, st.ReadOnly, st.AccessCodeAuth, st.TokenInURL, st.ClientCount, local, public, tunnelMode, st.StartedAt.Local().Format(time.RFC3339), tokenExpiry, idleDeadline, st.PID, st.CloudflaredPID, st.CaffeinatePID)
 	}
 	return 0
 }
@@ -639,13 +766,35 @@ func waitForLocalHealth(ctx context.Context, healthURL string, timeout time.Dura
 	}
 }
 
-func appendToken(baseURL, token string) string {
+func buildShareURL(baseURL, token string, includeToken, requireCode bool) string {
 	base := strings.TrimSpace(baseURL)
 	if base == "" {
 		return ""
 	}
 	base = strings.TrimRight(base, "/")
-	return base + "/?token=" + token
+	out := base + "/"
+	values := url.Values{}
+	if includeToken {
+		values.Set("token", token)
+	}
+	if requireCode {
+		values.Set("require_code", "1")
+	}
+	if encoded := values.Encode(); encoded != "" {
+		out += "?" + encoded
+	}
+	return out
+}
+
+func normalizeTunnelMode(mode string) string {
+	m := strings.TrimSpace(strings.ToLower(mode))
+	if m == "" {
+		return "ephemeral"
+	}
+	if m != "named" && m != "ephemeral" {
+		return "ephemeral"
+	}
+	return m
 }
 
 func terminatePID(pid int, sig syscall.Signal) error {

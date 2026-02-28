@@ -31,6 +31,9 @@ type SessionState struct {
 	TokenExpiresAt time.Time `json:"token_expires_at,omitempty"`
 	IdleTimeoutSec int       `json:"idle_timeout_seconds,omitempty"`
 	IdleDeadline   time.Time `json:"idle_deadline,omitempty"`
+	TunnelMode     string    `json:"tunnel_mode,omitempty"`
+	TokenInURL     bool      `json:"token_in_url,omitempty"`
+	AccessCodeAuth bool      `json:"access_code_auth,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at"`
 	ClientCount    int       `json:"client_count"`
 	SettingsFile   string    `json:"settings_file,omitempty"`

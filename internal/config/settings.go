@@ -45,7 +45,17 @@ type TunnelSettings struct {
 	Enabled    bool                     `toml:"enabled"`
 	Provider   string                   `toml:"provider"`
 	Required   bool                     `toml:"required"`
+	Mode       string                   `toml:"mode"`
+	Named      NamedTunnelSettings      `toml:"named"`
 	Cloudflare CloudflareTunnelSettings `toml:"cloudflare"`
+}
+
+type NamedTunnelSettings struct {
+	Hostname        string `toml:"hostname"`
+	TunnelName      string `toml:"tunnel_name"`
+	TunnelToken     string `toml:"tunnel_token"`
+	ConfigFile      string `toml:"config_file"`
+	CredentialsFile string `toml:"credentials_file"`
 }
 
 type CloudflareTunnelSettings struct {
@@ -55,8 +65,10 @@ type CloudflareTunnelSettings struct {
 }
 
 type SecuritySettings struct {
-	ReadOnlyDefault bool `toml:"readonly_default"`
-	MaskTokensInLog bool `toml:"mask_tokens_in_logs"`
+	ReadOnlyDefault bool   `toml:"readonly_default"`
+	MaskTokensInLog bool   `toml:"mask_tokens_in_logs"`
+	AccessCode      string `toml:"access_code"`
+	TokenInURL      *bool  `toml:"token_in_url,omitempty"`
 }
 
 type UISettings struct {
@@ -98,6 +110,7 @@ func defaultSettings() Settings {
 			Enabled:  true,
 			Provider: "cloudflare",
 			Required: false,
+			Mode:     "ephemeral",
 			Cloudflare: CloudflareTunnelSettings{
 				Enabled:               true,
 				Binary:                "cloudflared",
@@ -107,6 +120,8 @@ func defaultSettings() Settings {
 		Security: SecuritySettings{
 			ReadOnlyDefault: true,
 			MaskTokensInLog: true,
+			AccessCode:      "",
+			TokenInURL:      boolPtr(true),
 		},
 		UI:      UISettings{Emoji: true},
 		Logging: LoggingSettings{Level: "info"},
@@ -160,12 +175,25 @@ func applyDefaults(s *Settings) {
 	if s.Tunnel.Provider == "" {
 		s.Tunnel.Provider = "cloudflare"
 	}
+	s.Tunnel.Mode = strings.TrimSpace(strings.ToLower(s.Tunnel.Mode))
+	if s.Tunnel.Mode != "named" && s.Tunnel.Mode != "ephemeral" {
+		s.Tunnel.Mode = "ephemeral"
+	}
+	s.Tunnel.Named.Hostname = strings.TrimSpace(s.Tunnel.Named.Hostname)
+	s.Tunnel.Named.TunnelName = strings.TrimSpace(s.Tunnel.Named.TunnelName)
+	s.Tunnel.Named.TunnelToken = strings.TrimSpace(s.Tunnel.Named.TunnelToken)
+	s.Tunnel.Named.ConfigFile = strings.TrimSpace(s.Tunnel.Named.ConfigFile)
+	s.Tunnel.Named.CredentialsFile = strings.TrimSpace(s.Tunnel.Named.CredentialsFile)
 	s.Tunnel.Cloudflare.Binary = strings.TrimSpace(s.Tunnel.Cloudflare.Binary)
 	if s.Tunnel.Cloudflare.Binary == "" {
 		s.Tunnel.Cloudflare.Binary = "cloudflared"
 	}
 	if s.Tunnel.Cloudflare.StartupTimeoutSeconds <= 0 {
 		s.Tunnel.Cloudflare.StartupTimeoutSeconds = 20
+	}
+	s.Security.AccessCode = strings.TrimSpace(s.Security.AccessCode)
+	if s.Security.TokenInURL == nil {
+		s.Security.TokenInURL = boolPtr(true)
 	}
 	s.Logging.Level = strings.TrimSpace(strings.ToLower(s.Logging.Level))
 	if s.Logging.Level == "" {
@@ -265,4 +293,9 @@ func Save(settings Settings) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
+}
+
+func boolPtr(v bool) *bool {
+	b := v
+	return &b
 }

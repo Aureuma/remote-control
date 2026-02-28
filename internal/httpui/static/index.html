@@ -88,7 +88,9 @@
   let ackBatchBytes = 262144;
   const ACK_FLUSH_MS = 120;
   const params = new URLSearchParams(window.location.search);
-  const token = params.get("token") || "";
+  let token = params.get("token") || "";
+  let accessCode = params.get("code") || "";
+  const requireCode = params.get("require_code") === "1";
   const statusEl = document.getElementById("status");
 
   const term = new Terminal({
@@ -122,6 +124,26 @@
   function wsURL() {
     const proto = window.location.protocol === "https:" ? "wss" : "ws";
     return `${proto}://${window.location.host}/ws`;
+  }
+
+  function ensureAuthInputs() {
+    if (!token) {
+      const enteredToken = window.prompt("Enter access token");
+      token = (enteredToken || "").trim();
+      if (!token) {
+        setStatus("Auth token required", "error");
+        return false;
+      }
+    }
+    if (requireCode && !accessCode) {
+      const enteredCode = window.prompt("Enter access code");
+      accessCode = (enteredCode || "").trim();
+      if (!accessCode) {
+        setStatus("Access code required", "error");
+        return false;
+      }
+    }
+    return true;
   }
 
   function sendAck(force) {
@@ -171,9 +193,13 @@
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
+      if (!ensureAuthInputs()) {
+        ws.close();
+        return;
+      }
       reconnectDelay = 500;
       setStatus("Connected", "ok");
-      ws.send(JSON.stringify({ type: "auth", token, columns: term.cols, rows: term.rows }));
+      ws.send(JSON.stringify({ type: "auth", token, code: accessCode, columns: term.cols, rows: term.rows }));
       ws.send(JSON.stringify({ type: "resize", columns: term.cols, rows: term.rows }));
       sendAck(true);
     };
@@ -209,6 +235,15 @@
       }
       if (msg.type === "auth_error") {
         setStatus("Auth failed", "error");
+        const lower = String(msg.message || "").toLowerCase();
+        if (lower.includes("token")) {
+          const enteredToken = window.prompt("Enter access token", token);
+          token = (enteredToken || "").trim();
+        }
+        if (lower.includes("access code")) {
+          const enteredCode = window.prompt("Enter access code", accessCode);
+          accessCode = (enteredCode || "").trim();
+        }
       }
       if (msg.type === "flow_pause") {
         setStatus("Slow network (paused)", "warn");
