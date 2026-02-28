@@ -1,0 +1,10 @@
+{
+  "name": "remote-control",
+  "private": true,
+  "scripts": {
+    "test:browser": "playwright test -c playwright.config.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.51.1"
+  }
+}
