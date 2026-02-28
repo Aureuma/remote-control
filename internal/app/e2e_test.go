@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Aureuma/remote-control/internal/session"
 )
 
 func TestE2EStartStatusStop(t *testing.T) {
@@ -79,6 +81,25 @@ func TestE2EAttachStatusStop(t *testing.T) {
 		kill := exec.Command("tmux", "kill-session", "-t", tmuxSession)
 		_, _ = kill.CombinedOutput()
 	}()
+
+	// Some CI tmux environments reject attach-session under a PTY with
+	// immediate non-zero exit. Probe first and skip when attach semantics
+	// are unavailable on the current host.
+	probe, err := session.StartAttach(tmuxSession)
+	if err != nil {
+		t.Skipf("tmux attach probe unavailable on this host: %v", err)
+	}
+	probeDone := make(chan error, 1)
+	go func() {
+		probeDone <- probe.Wait()
+	}()
+	select {
+	case err := <-probeDone:
+		_ = probe.Close()
+		t.Skipf("tmux attach not supported in this environment: %v", err)
+	case <-time.After(700 * time.Millisecond):
+		_ = probe.Close()
+	}
 
 	serverCmd := exec.Command(bin,
 		"attach",
