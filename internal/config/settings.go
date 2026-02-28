@@ -20,6 +20,7 @@ type Settings struct {
 	UI            UISettings       `toml:"ui"`
 	Logging       LoggingSettings  `toml:"logging"`
 	MacOS         MacOSSettings    `toml:"macos"`
+	Development   Development      `toml:"development"`
 	Metadata      MetadataSettings `toml:"metadata,omitempty"`
 }
 
@@ -84,6 +85,24 @@ type MacOSSettings struct {
 	Caffeinate bool `toml:"caffeinate"`
 }
 
+type Development struct {
+	Enabled bool              `toml:"enabled"`
+	Safari  SafariDevelopment `toml:"safari"`
+}
+
+type SafariDevelopment struct {
+	SSH SafariSSHSettings `toml:"ssh"`
+}
+
+type SafariSSHSettings struct {
+	Host       string `toml:"host"`
+	Port       string `toml:"port"`
+	User       string `toml:"user"`
+	HostEnvKey string `toml:"host_env_key"`
+	PortEnvKey string `toml:"port_env_key"`
+	UserEnvKey string `toml:"user_env_key"`
+}
+
 type MetadataSettings struct {
 	UpdatedAt string `toml:"updated_at,omitempty"`
 }
@@ -126,6 +145,16 @@ func defaultSettings() Settings {
 		UI:      UISettings{Emoji: true},
 		Logging: LoggingSettings{Level: "info"},
 		MacOS:   MacOSSettings{Caffeinate: true},
+		Development: Development{
+			Enabled: false,
+			Safari: SafariDevelopment{
+				SSH: SafariSSHSettings{
+					HostEnvKey: "SHAWN_MAC_HOST",
+					PortEnvKey: "SHAWN_MAC_PORT",
+					UserEnvKey: "SHAWN_MAC_USER",
+				},
+			},
+		},
 	}
 }
 
@@ -200,6 +229,74 @@ func applyDefaults(s *Settings) {
 		s.Logging.Level = "info"
 	}
 	s.Logging.File = strings.TrimSpace(s.Logging.File)
+	s.Development.Safari.SSH.Host = strings.TrimSpace(s.Development.Safari.SSH.Host)
+	s.Development.Safari.SSH.Port = strings.TrimSpace(s.Development.Safari.SSH.Port)
+	s.Development.Safari.SSH.User = strings.TrimSpace(s.Development.Safari.SSH.User)
+	s.Development.Safari.SSH.HostEnvKey = strings.TrimSpace(s.Development.Safari.SSH.HostEnvKey)
+	s.Development.Safari.SSH.PortEnvKey = strings.TrimSpace(s.Development.Safari.SSH.PortEnvKey)
+	s.Development.Safari.SSH.UserEnvKey = strings.TrimSpace(s.Development.Safari.SSH.UserEnvKey)
+	if s.Development.Safari.SSH.HostEnvKey == "" {
+		s.Development.Safari.SSH.HostEnvKey = "SHAWN_MAC_HOST"
+	}
+	if s.Development.Safari.SSH.PortEnvKey == "" {
+		s.Development.Safari.SSH.PortEnvKey = "SHAWN_MAC_PORT"
+	}
+	if s.Development.Safari.SSH.UserEnvKey == "" {
+		s.Development.Safari.SSH.UserEnvKey = "SHAWN_MAC_USER"
+	}
+}
+
+func ResolveSettingValue(raw string, envKey string) string {
+	if value := resolveEnvValueByKey(envKey); value != "" {
+		return value
+	}
+	if key, ok := ParseEnvReference(raw); ok {
+		return resolveEnvValueByKey(key)
+	}
+	return strings.TrimSpace(raw)
+}
+
+func ParseEnvReference(raw string) (string, bool) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", false
+	}
+	if strings.HasPrefix(value, "env:") {
+		key := strings.TrimSpace(strings.TrimPrefix(value, "env:"))
+		return key, key != ""
+	}
+	if strings.HasPrefix(value, "${") && strings.HasSuffix(value, "}") {
+		key := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(value, "${"), "}"))
+		return key, key != ""
+	}
+	if looksLikeEnvKey(value) {
+		return value, true
+	}
+	return "", false
+}
+
+func resolveEnvValueByKey(key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ""
+	}
+	return strings.TrimSpace(os.Getenv(key))
+}
+
+func looksLikeEnvKey(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func HomeDir() (string, error) {
