@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/si/remote-control/internal/config"
@@ -134,4 +136,42 @@ func ListSessions() ([]SessionState, error) {
 		return states[i].StartedAt.After(states[j].StartedAt)
 	})
 	return states, nil
+}
+
+func ProcessAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	if err := p.Signal(syscall.Signal(0)); err != nil {
+		return false
+	}
+	return true
+}
+
+func PruneStaleSessions() ([]string, error) {
+	states, err := ListSessions()
+	if err != nil {
+		return nil, err
+	}
+	removed := make([]string, 0, len(states))
+	for _, state := range states {
+		if strings.TrimSpace(state.ID) == "" {
+			continue
+		}
+		if ProcessAlive(state.PID) {
+			continue
+		}
+		if err := RemoveSession(state.ID); err != nil {
+			return removed, err
+		}
+		removed = append(removed, state.ID)
+	}
+	return removed, nil
 }

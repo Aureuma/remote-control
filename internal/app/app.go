@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -94,6 +93,7 @@ func cmdSessions() int {
 }
 
 func cmdAttach(settings config.Settings, args []string) int {
+	pruneStaleRuntimeState()
 	fs := flag.NewFlagSet("attach", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	tmuxSession := fs.String("tmux-session", "", "tmux session name")
@@ -135,6 +135,7 @@ func cmdAttach(settings config.Settings, args []string) int {
 }
 
 func cmdStart(settings config.Settings, args []string) int {
+	pruneStaleRuntimeState()
 	fs := flag.NewFlagSet("start", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	cmdValue := fs.String("cmd", "", "command to run in a pty")
@@ -305,6 +306,7 @@ func runServer(term *session.Terminal, opts launchOptions) int {
 }
 
 func cmdStatus() int {
+	pruneStaleRuntimeState()
 	states, err := runtimeState.ListSessions()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Could not read runtime state: %v\n", err)
@@ -317,7 +319,7 @@ func cmdStatus() int {
 	fmt.Println("📋 remote-control sessions")
 	for _, st := range states {
 		status := "stopped"
-		if processAlive(st.PID) {
+		if runtimeState.ProcessAlive(st.PID) {
 			status = "running"
 		}
 		fmt.Printf("- %s [%s] mode=%s readonly=%t clients=%d addr=%s started=%s\n",
@@ -327,6 +329,7 @@ func cmdStatus() int {
 }
 
 func cmdStop(args []string) int {
+	pruneStaleRuntimeState()
 	fs := flag.NewFlagSet("stop", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	id := fs.String("id", "", "session id to stop")
@@ -362,7 +365,7 @@ func cmdStop(args []string) int {
 		fmt.Fprintf(os.Stderr, "❌ Session %q not found\n", targetID)
 		return 1
 	}
-	if !processAlive(target.PID) {
+	if !runtimeState.ProcessAlive(target.PID) {
 		_ = runtimeState.RemoveSession(target.ID)
 		fmt.Printf("ℹ️ Session %s already stopped; cleaned stale state.\n", target.ID)
 		return 0
@@ -381,20 +384,7 @@ func cmdStop(args []string) int {
 }
 
 func processAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	if runtime.GOOS == "windows" {
-		return true
-	}
-	if err := p.Signal(syscall.Signal(0)); err != nil {
-		return false
-	}
-	return true
+	return runtimeState.ProcessAlive(pid)
 }
 
 func RepoRoot() (string, error) {
@@ -403,4 +393,15 @@ func RepoRoot() (string, error) {
 		return "", err
 	}
 	return filepath.Dir(exe), nil
+}
+
+func pruneStaleRuntimeState() {
+	removed, err := runtimeState.PruneStaleSessions()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠️ Could not prune stale session state: %v\n", err)
+		return
+	}
+	if len(removed) > 0 {
+		fmt.Printf("🧹 Cleaned stale session state: %s\n", strings.Join(removed, ", "))
+	}
 }
