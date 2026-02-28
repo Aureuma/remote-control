@@ -126,22 +126,42 @@ func cmdAttach(settings config.Settings, args []string) int {
 	noCaffeinate := fs.Bool("no-caffeinate", false, "disable caffeinate even if enabled in settings")
 	sessionID := fs.String("id", "", "runtime session id")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 
 	name := strings.TrimSpace(*tmuxSession)
+	list, err := tmux.ListSessions()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Could not discover tmux sessions: %v\n", err)
+		return 1
+	}
+	if len(list) == 0 {
+		fmt.Fprintln(os.Stderr, "❌ No tmux sessions found. Start one with: tmux new -s my-session")
+		return 1
+	}
 	if name == "" {
-		list, err := tmux.ListSessions()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Could not discover tmux sessions: %v\n", err)
-			return 1
-		}
-		if len(list) == 0 {
-			fmt.Fprintln(os.Stderr, "❌ No tmux sessions found. Start one with: tmux new -s my-session")
-			return 1
-		}
 		name = list[0].Name
 		fmt.Printf("ℹ️ Using tmux session: %s\n", name)
+	} else {
+		found := false
+		for _, s := range list {
+			if s.Name == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			names := make([]string, 0, len(list))
+			for _, s := range list {
+				names = append(names, s.Name)
+			}
+			sort.Strings(names)
+			fmt.Fprintf(os.Stderr, "❌ tmux session %q not found. Available: %s\n", name, strings.Join(names, ", "))
+			return 1
+		}
 	}
 	term, err := session.StartAttach(name)
 	if err != nil {
@@ -185,6 +205,9 @@ func cmdStart(settings config.Settings, args []string) int {
 	noCaffeinate := fs.Bool("no-caffeinate", false, "disable caffeinate even if enabled in settings")
 	sessionID := fs.String("id", "", "runtime session id")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 	command := strings.TrimSpace(*cmdValue)
@@ -518,6 +541,9 @@ func cmdStop(args []string) int {
 	fs.SetOutput(os.Stderr)
 	id := fs.String("id", "", "session id to stop")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 	states, err := runtimeState.ListSessions()
