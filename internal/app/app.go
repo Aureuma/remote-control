@@ -44,6 +44,9 @@ type launchOptions struct {
 	maxClients        int
 	flowLowBytes      int64
 	flowHighBytes     int64
+	flowAckBytes      int64
+	tokenTTL          time.Duration
+	idleTimeout       time.Duration
 	enableTunnel      bool
 	tunnelRequired    bool
 	cloudflaredBinary string
@@ -154,6 +157,9 @@ func cmdAttach(settings config.Settings, args []string) int {
 		maxClients:        settings.Session.MaxClients,
 		flowLowBytes:      settings.Flow.LowWatermarkBytes,
 		flowHighBytes:     settings.Flow.HighWatermarkBytes,
+		flowAckBytes:      settings.Flow.AckQuantumBytes,
+		tokenTTL:          time.Duration(settings.Session.TokenTTLSeconds) * time.Second,
+		idleTimeout:       time.Duration(settings.Session.IdleTimeoutSeconds) * time.Second,
 		enableTunnel:      *tunnel && !*noTunnel,
 		tunnelRequired:    *tunnelRequired,
 		cloudflaredBinary: strings.TrimSpace(*cloudflaredBin),
@@ -200,6 +206,9 @@ func cmdStart(settings config.Settings, args []string) int {
 		maxClients:        settings.Session.MaxClients,
 		flowLowBytes:      settings.Flow.LowWatermarkBytes,
 		flowHighBytes:     settings.Flow.HighWatermarkBytes,
+		flowAckBytes:      settings.Flow.AckQuantumBytes,
+		tokenTTL:          time.Duration(settings.Session.TokenTTLSeconds) * time.Second,
+		idleTimeout:       time.Duration(settings.Session.IdleTimeoutSeconds) * time.Second,
 		enableTunnel:      *tunnel && !*noTunnel,
 		tunnelRequired:    *tunnelRequired,
 		cloudflaredBinary: strings.TrimSpace(*cloudflaredBin),
@@ -225,11 +234,12 @@ func runServer(term *session.Terminal, opts launchOptions) int {
 	if id == "" {
 		id = fmt.Sprintf("rc-%d", time.Now().Unix())
 	}
-	token, err := auth.NewToken()
+	issuedToken, err := auth.NewTokenWithTTL(opts.tokenTTL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Could not generate access token: %v\n", err)
 		return 1
 	}
+	token := issuedToken.Value
 	addr := fmt.Sprintf("%s:%d", opts.bind, opts.port)
 	localURL := fmt.Sprintf("http://%s/", addr)
 	shareURL := appendToken(localURL, token)
@@ -250,10 +260,15 @@ func runServer(term *session.Terminal, opts launchOptions) int {
 		PublicURL:      "",
 		Tunnel:         "local",
 		StartedAt:      time.Now().UTC(),
+		TokenExpiresAt: issuedToken.ExpiresAt,
+		IdleTimeoutSec: int(opts.idleTimeout / time.Second),
 		ClientCount:    0,
 		SettingsFile:   settingsPath,
 		CloudflaredPID: 0,
 		CaffeinatePID:  0,
+	}
+	if opts.idleTimeout > 0 {
+		state.IdleDeadline = state.StartedAt.Add(opts.idleTimeout)
 	}
 	if err := runtimeState.SaveSession(state); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠️ Could not persist runtime state: %v\n", err)
@@ -267,11 +282,20 @@ func runServer(term *session.Terminal, opts launchOptions) int {
 		MaxClients:         opts.maxClients,
 		LowWatermarkBytes:  opts.flowLowBytes,
 		HighWatermarkBytes: opts.flowHighBytes,
+		AckQuantumBytes:    opts.flowAckBytes,
+		TokenExpiresAt:     issuedToken.ExpiresAt,
 		PingInterval:       25 * time.Second,
 		ClientReadTimeout:  90 * time.Second,
 		OnClientCountChange: func(count int) {
 			stateMu.Lock()
 			state.ClientCount = count
+			if opts.idleTimeout > 0 {
+				if count == 0 {
+					state.IdleDeadline = time.Now().UTC().Add(opts.idleTimeout)
+				} else {
+					state.IdleDeadline = time.Time{}
+				}
+			}
 			_ = runtimeState.SaveSession(state)
 			stateMu.Unlock()
 		},
@@ -304,7 +328,7 @@ func runServer(term *session.Terminal, opts launchOptions) int {
 		source string
 		err    error
 	}
-	eventCh := make(chan runtimeEvent, 2)
+	eventCh := make(chan runtimeEvent, 3)
 	go func() {
 		err := srv.ListenAndServe()
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -314,6 +338,33 @@ func runServer(term *session.Terminal, opts launchOptions) int {
 	go func() {
 		eventCh <- runtimeEvent{source: "terminal", err: term.Wait()}
 	}()
+	if opts.idleTimeout > 0 {
+		go func() {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-runCtx.Done():
+					return
+				case <-ticker.C:
+					stateMu.Lock()
+					clientCount := state.ClientCount
+					idleDeadline := state.IdleDeadline
+					stateMu.Unlock()
+					if clientCount > 0 || idleDeadline.IsZero() {
+						continue
+					}
+					if !time.Now().UTC().Before(idleDeadline) {
+						select {
+						case eventCh <- runtimeEvent{source: "idle"}:
+						default:
+						}
+						return
+					}
+				}
+			}
+		}()
+	}
 
 	var managed []managedProcess
 	defer func() {
@@ -373,6 +424,7 @@ func runServer(term *session.Terminal, opts launchOptions) int {
 	fmt.Printf("🆔 Session ID: %s\n", id)
 	fmt.Printf("🌐 Share URL: %s\n", shareURL)
 	fmt.Printf("🏠 Local URL: %s\n", localURL)
+	fmt.Printf("⏳ Token expires: %s\n", issuedToken.ExpiresAt.Local().Format(time.RFC3339))
 	if strings.TrimSpace(state.PublicURL) != "" {
 		fmt.Printf("☁️  Tunnel URL: %s\n", state.PublicURL)
 	}
@@ -380,6 +432,9 @@ func runServer(term *session.Terminal, opts launchOptions) int {
 		fmt.Println("🔒 Mode: read-only")
 	} else {
 		fmt.Println("✍️  Mode: read-write")
+	}
+	if opts.idleTimeout > 0 {
+		fmt.Printf("🕒 Idle timeout: %s\n", opts.idleTimeout.String())
 	}
 	fmt.Println("📱 Open the URL in Chrome or Safari.")
 	fmt.Println("🛑 Press Ctrl+C to stop sharing.")
@@ -401,6 +456,10 @@ func runServer(term *session.Terminal, opts launchOptions) int {
 				fmt.Println("ℹ️ Terminal process exited.")
 			}
 		default:
+			if event.source == "idle" {
+				fmt.Println("⏱️ Idle timeout reached. Session stopped.")
+				break
+			}
 			if event.err != nil {
 				fmt.Fprintf(os.Stderr, "❌ Server error: %v\n", event.err)
 				exitCode = 1
@@ -439,8 +498,16 @@ func cmdStatus() int {
 		if public == "" {
 			public = "-"
 		}
-		fmt.Printf("- %s [%s] mode=%s readonly=%t clients=%d local=%s public=%s started=%s pids(parent=%d cf=%d caf=%d)\n",
-			st.ID, status, st.Mode, st.ReadOnly, st.ClientCount, local, public, st.StartedAt.Local().Format(time.RFC3339), st.PID, st.CloudflaredPID, st.CaffeinatePID)
+		tokenExpiry := "-"
+		if !st.TokenExpiresAt.IsZero() {
+			tokenExpiry = st.TokenExpiresAt.Local().Format(time.RFC3339)
+		}
+		idleDeadline := "-"
+		if !st.IdleDeadline.IsZero() {
+			idleDeadline = st.IdleDeadline.Local().Format(time.RFC3339)
+		}
+		fmt.Printf("- %s [%s] mode=%s readonly=%t clients=%d local=%s public=%s started=%s token_expires=%s idle_deadline=%s pids(parent=%d cf=%d caf=%d)\n",
+			st.ID, status, st.Mode, st.ReadOnly, st.ClientCount, local, public, st.StartedAt.Local().Format(time.RFC3339), tokenExpiry, idleDeadline, st.PID, st.CloudflaredPID, st.CaffeinatePID)
 	}
 	return 0
 }

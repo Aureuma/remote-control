@@ -2,7 +2,7 @@
 
 `remote-control` serves a local terminal session to a browser.
 
-Implemented scope (Phase 0-3):
+Implemented scope (Phase 0-5):
 - Go-first server with embedded browser UI.
 - tmux session discovery and attach mode.
 - command mode (`--cmd`) for spawning a new PTY process.
@@ -12,6 +12,9 @@ Implemented scope (Phase 0-3):
 - optional Cloudflare ephemeral tunnel integration.
 - optional macOS `caffeinate` integration.
 - settings and runtime state under `~/.si/remote-control`.
+- token TTL enforcement and idle-timeout session shutdown.
+- same-host/origin websocket checks compatible with public tunnel hostnames.
+- regression tests for flow, tunnel URL parsing, token expiry, tmux parsing, and runtime state pruning.
 
 ## Commands
 
