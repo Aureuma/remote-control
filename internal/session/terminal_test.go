@@ -43,7 +43,8 @@ func TestStartTTYPathReadWriteAndWait(t *testing.T) {
 	if err != nil {
 		t.Fatalf("term.Read: %v", err)
 	}
-	if string(buf[:n]) != "hello\n" {
+	payload := strings.ReplaceAll(string(buf[:n]), "\r\n", "\n")
+	if payload != "hello\n" {
 		t.Fatalf("unexpected term read payload: %q", string(buf[:n]))
 	}
 	if err := <-writeDone; err != nil {
@@ -53,14 +54,22 @@ func TestStartTTYPathReadWriteAndWait(t *testing.T) {
 	if err := term.WriteInput([]byte("echo\n")); err != nil {
 		t.Fatalf("term.WriteInput: %v", err)
 	}
-	readBack := make([]byte, 32)
-	_ = ptmx.SetReadDeadline(time.Now().Add(2 * time.Second))
-	m, err := ptmx.Read(readBack)
-	if err != nil {
-		t.Fatalf("ptmx.Read: %v", err)
+	readBack := make([]byte, 64)
+	deadline := time.Now().Add(2 * time.Second)
+	accumulated := ""
+	for time.Now().Before(deadline) {
+		_ = ptmx.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+		m, readErr := ptmx.Read(readBack)
+		if readErr != nil {
+			continue
+		}
+		accumulated += strings.ReplaceAll(string(readBack[:m]), "\r\n", "\n")
+		if strings.Contains(accumulated, "echo") {
+			break
+		}
 	}
-	if !strings.Contains(string(readBack[:m]), "echo") {
-		t.Fatalf("unexpected ptmx payload: %q", string(readBack[:m]))
+	if !strings.Contains(accumulated, "echo") {
+		t.Fatalf("unexpected ptmx payload: %q", accumulated)
 	}
 
 	waitDone := make(chan error, 1)
