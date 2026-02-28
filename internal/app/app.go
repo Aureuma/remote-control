@@ -210,11 +210,19 @@ func runServer(term *session.Terminal, opts launchOptions) int {
 		_ = runtimeState.RemoveSession(id)
 	}()
 
-	bridge := ws.New(term, token, opts.readonly, 1, func(count int) {
-		stateMu.Lock()
-		state.ClientCount = count
-		_ = runtimeState.SaveSession(state)
-		stateMu.Unlock()
+	bridge := ws.New(term, token, ws.ServerOptions{
+		ReadOnly:           opts.readonly,
+		MaxClients:         1,
+		LowWatermarkBytes:  512 * 1024,
+		HighWatermarkBytes: 2 * 1024 * 1024,
+		PingInterval:       25 * time.Second,
+		ClientReadTimeout:  90 * time.Second,
+		OnClientCountChange: func(count int) {
+			stateMu.Lock()
+			state.ClientCount = count
+			_ = runtimeState.SaveSession(state)
+			stateMu.Unlock()
+		},
 	})
 	bridge.Start()
 	defer bridge.Close()
