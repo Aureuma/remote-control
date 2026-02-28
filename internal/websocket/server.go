@@ -20,6 +20,7 @@ import (
 type Message struct {
 	Type    string `json:"type"`
 	Token   string `json:"token,omitempty"`
+	Code    string `json:"code,omitempty"`
 	Data    string `json:"data,omitempty"`
 	Columns int    `json:"columns,omitempty"`
 	Rows    int    `json:"rows,omitempty"`
@@ -34,6 +35,7 @@ type ServerOptions struct {
 	HighWatermarkBytes  int64
 	AckQuantumBytes     int64
 	TokenExpiresAt      time.Time
+	AccessCode          string
 	PingInterval        time.Duration
 	ClientReadTimeout   time.Duration
 	OnClientCountChange func(int)
@@ -60,6 +62,7 @@ type Server struct {
 	flow   flowController
 
 	tokenExpiresAt    time.Time
+	accessCode        string
 	ackQuantumBytes   int64
 	pingInterval      time.Duration
 	clientReadTimeout time.Duration
@@ -95,6 +98,7 @@ func New(terminal *session.Terminal, token string, opts ServerOptions) *Server {
 		conns:               map[*gws.Conn]struct{}{},
 		flow:                newFlowController(opts.LowWatermarkBytes, opts.HighWatermarkBytes),
 		tokenExpiresAt:      opts.TokenExpiresAt.UTC(),
+		accessCode:          strings.TrimSpace(opts.AccessCode),
 		ackQuantumBytes:     ackQuantumBytes,
 		pingInterval:        pingInterval,
 		clientReadTimeout:   clientReadTimeout,
@@ -223,6 +227,15 @@ func (s *Server) authenticate(conn *gws.Conn) error {
 	}
 	if subtle.ConstantTimeCompare([]byte(msg.Token), []byte(s.token)) != 1 {
 		return errors.New("invalid token")
+	}
+	if s.accessCode != "" {
+		code := strings.TrimSpace(msg.Code)
+		if code == "" {
+			return errors.New("access code required")
+		}
+		if subtle.ConstantTimeCompare([]byte(code), []byte(s.accessCode)) != 1 {
+			return errors.New("invalid access code")
+		}
 	}
 	if msg.Columns > 0 && msg.Rows > 0 {
 		_ = s.terminal.Resize(msg.Columns, msg.Rows)

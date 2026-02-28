@@ -18,6 +18,7 @@ type Mode string
 const (
 	ModeAttach Mode = "attach"
 	ModeCmd    Mode = "cmd"
+	ModeTTY    Mode = "tty"
 )
 
 type Terminal struct {
@@ -25,6 +26,8 @@ type Terminal struct {
 	source    string
 	cmd       *exec.Cmd
 	ptyFile   *os.File
+	waitCh    chan struct{}
+	external  bool
 	writeMu   sync.Mutex
 	closeOnce sync.Once
 }
@@ -52,6 +55,24 @@ func StartCommand(command string) (*Terminal, error) {
 	return start(ModeCmd, command, cmd)
 }
 
+func StartTTYPath(path string) (*Terminal, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, fmt.Errorf("tty path is required")
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return nil, err
+	}
+	return &Terminal{
+		mode:     ModeTTY,
+		source:   path,
+		ptyFile:  f,
+		waitCh:   make(chan struct{}),
+		external: true,
+	}, nil
+}
+
 func start(mode Mode, source string, cmd *exec.Cmd) (*Terminal, error) {
 	if cmd == nil {
 		return nil, fmt.Errorf("command is nil")
@@ -60,7 +81,7 @@ func start(mode Mode, source string, cmd *exec.Cmd) (*Terminal, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Terminal{mode: mode, source: source, cmd: cmd, ptyFile: f}, nil
+	return &Terminal{mode: mode, source: source, cmd: cmd, ptyFile: f, waitCh: make(chan struct{})}, nil
 }
 
 func (t *Terminal) Mode() Mode {
@@ -115,7 +136,11 @@ func (t *Terminal) Resize(cols, rows int) error {
 }
 
 func (t *Terminal) Wait() error {
-	if t == nil || t.cmd == nil {
+	if t == nil {
+		return nil
+	}
+	if t.cmd == nil {
+		<-t.waitCh
 		return nil
 	}
 	return t.cmd.Wait()
@@ -127,13 +152,16 @@ func (t *Terminal) Close() error {
 	}
 	var retErr error
 	t.closeOnce.Do(func() {
-		if t.cmd != nil && t.cmd.Process != nil {
+		if !t.external && t.cmd != nil && t.cmd.Process != nil {
 			_ = t.cmd.Process.Kill()
 		}
 		if t.ptyFile != nil {
 			if err := t.ptyFile.Close(); err != nil {
 				retErr = err
 			}
+		}
+		if t.waitCh != nil {
+			close(t.waitCh)
 		}
 	})
 	return retErr

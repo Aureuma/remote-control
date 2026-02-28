@@ -5,19 +5,29 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
+	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
 var tunnelURLPattern = regexp.MustCompile(`https://[A-Za-z0-9.-]+(?:\:[0-9]+)?(?:/[\S]*)?`)
 
 type Options struct {
-	Binary         string
-	LocalURL       string
-	StartupTimeout time.Duration
+	Binary          string
+	LocalURL        string
+	StartupTimeout  time.Duration
+	Mode            string
+	Hostname        string
+	TunnelName      string
+	TunnelToken     string
+	ConfigFile      string
+	CredentialsFile string
 }
 
 type Handle struct {
@@ -42,8 +52,11 @@ func Start(ctx context.Context, opts Options) (*Handle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cloudflare tunnel binary not found: %w", err)
 	}
-
-	cmd := exec.CommandContext(ctx, resolved, "tunnel", "--url", localURL, "--no-autoupdate")
+	args, expectedURL, err := buildInvocation(localURL, opts)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, resolved, args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -54,6 +67,14 @@ func Start(ctx context.Context, opts Options) (*Handle, error) {
 	}
 	if err := cmd.Start(); err != nil {
 		return nil, err
+	}
+	if expectedURL != "" {
+		if err := waitForProcessStartup(ctx, cmd, opts.StartupTimeout); err != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return nil, err
+		}
+		return &Handle{cmd: cmd, publicURL: expectedURL}, nil
 	}
 
 	lines := make(chan string, 32)
@@ -89,6 +110,95 @@ func Start(ctx context.Context, opts Options) (*Handle, error) {
 			}
 		}
 	}
+}
+
+func buildInvocation(localURL string, opts Options) ([]string, string, error) {
+	mode := strings.TrimSpace(strings.ToLower(opts.Mode))
+	if mode == "" {
+		mode = "ephemeral"
+	}
+	switch mode {
+	case "ephemeral":
+		return []string{"tunnel", "--url", localURL, "--no-autoupdate"}, "", nil
+	case "named":
+		publicURL, err := normalizePublicURLFromHostname(opts.Hostname)
+		if err != nil {
+			return nil, "", fmt.Errorf("named tunnel requires a valid hostname: %w", err)
+		}
+		tunnelToken := strings.TrimSpace(opts.TunnelToken)
+		if tunnelToken != "" {
+			return []string{"tunnel", "run", "--token", tunnelToken}, publicURL, nil
+		}
+		args := []string{"tunnel", "--url", localURL, "--hostname", strings.TrimSpace(opts.Hostname), "--no-autoupdate"}
+		if cfg := strings.TrimSpace(opts.ConfigFile); cfg != "" {
+			args = append(args, "--config", cfg)
+		}
+		if creds := strings.TrimSpace(opts.CredentialsFile); creds != "" {
+			args = append(args, "--credentials-file", creds)
+		}
+		if name := strings.TrimSpace(opts.TunnelName); name != "" {
+			args = append(args, "--name", name)
+		}
+		return args, publicURL, nil
+	default:
+		return nil, "", fmt.Errorf("unsupported tunnel mode %q (expected ephemeral|named)", mode)
+	}
+}
+
+func normalizePublicURLFromHostname(raw string) (string, error) {
+	host := strings.TrimSpace(raw)
+	if host == "" {
+		return "", fmt.Errorf("hostname is required")
+	}
+	if strings.Contains(host, "://") {
+		parsed, err := url.Parse(host)
+		if err != nil {
+			return "", err
+		}
+		host = strings.TrimSpace(parsed.Host)
+	}
+	if i := strings.Index(host, "/"); i >= 0 {
+		host = strings.TrimSpace(host[:i])
+	}
+	host = strings.Trim(host, "/")
+	if host == "" {
+		return "", fmt.Errorf("hostname is empty")
+	}
+	return "https://" + host, nil
+}
+
+func waitForProcessStartup(ctx context.Context, cmd *exec.Cmd, timeout time.Duration) error {
+	if cmd == nil || cmd.Process == nil {
+		return fmt.Errorf("cloudflared process is not running")
+	}
+	if timeout <= 0 {
+		timeout = 20 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if !processRunning(cmd.Process) {
+			return fmt.Errorf("cloudflared exited before startup completed")
+		}
+		if time.Now().After(deadline) {
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+func processRunning(proc *os.Process) bool {
+	if proc == nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
 }
 
 func parsePublicURL(line string) (string, bool) {
