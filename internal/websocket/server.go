@@ -116,7 +116,7 @@ func (s *Server) Close() {
 	s.cancel()
 	s.connMu.Lock()
 	for conn := range s.conns {
-		_ = conn.WriteControl(gws.CloseMessage, gws.FormatCloseMessage(gws.CloseNormalClosure, "session closed"), time.Now().Add(2*time.Second))
+		_ = s.writeControl(conn, gws.CloseMessage, gws.FormatCloseMessage(gws.CloseNormalClosure, "session closed"), 2*time.Second)
 		_ = conn.Close()
 		delete(s.conns, conn)
 	}
@@ -133,14 +133,14 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.authenticate(conn); err != nil {
-		_ = conn.WriteMessage(gws.TextMessage, mustJSON(Message{Type: "auth_error", Message: err.Error()}))
-		_ = conn.WriteControl(gws.CloseMessage, gws.FormatCloseMessage(gws.ClosePolicyViolation, "auth failed"), time.Now().Add(2*time.Second))
+		_ = s.writeMessage(conn, gws.TextMessage, mustJSON(Message{Type: "auth_error", Message: err.Error()}), 3*time.Second)
+		_ = s.writeControl(conn, gws.CloseMessage, gws.FormatCloseMessage(gws.ClosePolicyViolation, "auth failed"), 2*time.Second)
 		_ = conn.Close()
 		return
 	}
 	if err := s.addConn(conn); err != nil {
-		_ = conn.WriteMessage(gws.TextMessage, mustJSON(Message{Type: "info", Message: err.Error()}))
-		_ = conn.WriteControl(gws.CloseMessage, gws.FormatCloseMessage(gws.CloseTryAgainLater, "client limit reached"), time.Now().Add(2*time.Second))
+		_ = s.writeMessage(conn, gws.TextMessage, mustJSON(Message{Type: "info", Message: err.Error()}), 3*time.Second)
+		_ = s.writeControl(conn, gws.CloseMessage, gws.FormatCloseMessage(gws.CloseTryAgainLater, "client limit reached"), 2*time.Second)
 		_ = conn.Close()
 		return
 	}
@@ -156,10 +156,10 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 	defer close(done)
 	go s.pingLoop(conn, done)
 
-	_ = conn.WriteMessage(gws.TextMessage, mustJSON(Message{Type: "auth_ok"}))
-	_ = conn.WriteMessage(gws.TextMessage, mustJSON(Message{Type: "prefs", Bytes: s.ackQuantumBytes}))
+	_ = s.writeMessage(conn, gws.TextMessage, mustJSON(Message{Type: "auth_ok"}), 3*time.Second)
+	_ = s.writeMessage(conn, gws.TextMessage, mustJSON(Message{Type: "prefs", Bytes: s.ackQuantumBytes}), 3*time.Second)
 	if s.readonly {
-		_ = conn.WriteMessage(gws.TextMessage, mustJSON(Message{Type: "readonly", Message: "🔒 Read-only mode enabled"}))
+		_ = s.writeMessage(conn, gws.TextMessage, mustJSON(Message{Type: "readonly", Message: "🔒 Read-only mode enabled"}), 3*time.Second)
 	}
 
 	for {
@@ -193,9 +193,7 @@ func (s *Server) pingLoop(conn *gws.Conn, done <-chan struct{}) {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
-			s.writeMu.Lock()
-			err := conn.WriteControl(gws.PingMessage, []byte("ping"), time.Now().Add(3*time.Second))
-			s.writeMu.Unlock()
+			err := s.writeControl(conn, gws.PingMessage, []byte("ping"), 3*time.Second)
 			if err != nil {
 				return
 			}
@@ -263,14 +261,14 @@ func (s *Server) handleClientMessage(conn *gws.Conn, msg Message) {
 	switch strings.ToLower(strings.TrimSpace(msg.Type)) {
 	case "input":
 		if s.readonly {
-			_ = conn.WriteMessage(gws.TextMessage, mustJSON(Message{Type: "readonly", Message: "🔒 Input blocked: read-only session"}))
+			_ = s.writeMessage(conn, gws.TextMessage, mustJSON(Message{Type: "readonly", Message: "🔒 Input blocked: read-only session"}), 3*time.Second)
 			return
 		}
 		_ = s.terminal.WriteInput([]byte(msg.Data))
 	case "resize":
 		_ = s.terminal.Resize(msg.Columns, msg.Rows)
 	case "ping":
-		_ = conn.WriteMessage(gws.TextMessage, mustJSON(Message{Type: "pong"}))
+		_ = s.writeMessage(conn, gws.TextMessage, mustJSON(Message{Type: "pong"}), 3*time.Second)
 	case "ack":
 		event := s.onBytesAcked(msg.Bytes)
 		if event == flowEventResume {
@@ -382,11 +380,27 @@ func (s *Server) broadcastText(msg Message) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	for _, conn := range conns {
-		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		if err := conn.WriteMessage(gws.TextMessage, payload); err != nil {
+		if err := s.writeMessageNoLock(conn, gws.TextMessage, payload, 5*time.Second); err != nil {
 			_ = conn.Close()
 		}
 	}
+}
+
+func (s *Server) writeControl(conn *gws.Conn, messageType int, data []byte, timeout time.Duration) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return conn.WriteControl(messageType, data, time.Now().Add(timeout))
+}
+
+func (s *Server) writeMessage(conn *gws.Conn, messageType int, payload []byte, timeout time.Duration) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.writeMessageNoLock(conn, messageType, payload, timeout)
+}
+
+func (s *Server) writeMessageNoLock(conn *gws.Conn, messageType int, payload []byte, timeout time.Duration) error {
+	_ = conn.SetWriteDeadline(time.Now().Add(timeout))
+	return conn.WriteMessage(messageType, payload)
 }
 
 func mustJSON(v any) []byte {
