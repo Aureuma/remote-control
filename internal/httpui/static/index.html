@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SI Remote Control</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.5.0/css/xterm.min.css" />
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #111827;
+      --text: #e5e7eb;
+      --muted: #94a3b8;
+      --ok: #22c55e;
+      --warn: #f59e0b;
+      --error: #ef4444;
+      --accent: #06b6d4;
+    }
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: radial-gradient(circle at top, #1e293b 0%, #0f172a 45%, #020617 100%);
+      color: var(--text);
+      font-family: "SF Pro Text", "Segoe UI", sans-serif;
+    }
+    .layout {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      height: 100%;
+    }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 14px;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.25);
+      background: rgba(17, 24, 39, 0.85);
+      backdrop-filter: blur(6px);
+    }
+    .badge {
+      border: 1px solid rgba(6, 182, 212, 0.45);
+      background: rgba(6, 182, 212, 0.12);
+      color: #67e8f9;
+      border-radius: 999px;
+      font-size: 12px;
+      padding: 4px 8px;
+      letter-spacing: 0.2px;
+    }
+    #status {
+      font-size: 13px;
+      color: var(--muted);
+    }
+    #terminal {
+      width: 100%;
+      height: 100%;
+      padding: 12px;
+      box-sizing: border-box;
+    }
+    .footer {
+      font-size: 12px;
+      color: var(--muted);
+      border-top: 1px solid rgba(148, 163, 184, 0.2);
+      padding: 8px 12px;
+      background: rgba(2, 6, 23, 0.85);
+    }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .error { color: var(--error); }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <div class="topbar">
+    <div>
+      <strong>SI Remote Control</strong>
+      <span class="badge">Browser Terminal</span>
+    </div>
+    <div id="status">Connecting...</div>
+  </div>
+  <div id="terminal"></div>
+  <div class="footer">Tip: rotate your phone for more columns. Read-only sessions ignore keyboard input.</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.10.0/lib/xterm-addon-fit.min.js"></script>
+<script>
+(() => {
+  const statusEl = document.getElementById("status");
+  const term = new Terminal({
+    cursorBlink: true,
+    convertEol: true,
+    fontSize: 14,
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    theme: {
+      background: "#0b1220",
+      foreground: "#f8fafc",
+      cursor: "#67e8f9"
+    }
+  });
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(document.getElementById("terminal"));
+  fitAddon.fit();
+
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get("token") || "";
+  const proto = window.location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${window.location.host}/ws`);
+  ws.binaryType = "arraybuffer";
+
+  function setStatus(text, cls) {
+    statusEl.className = cls || "";
+    statusEl.textContent = text;
+  }
+
+  ws.onopen = () => {
+    setStatus("Connected", "ok");
+    ws.send(JSON.stringify({ type: "auth", token, columns: term.cols, rows: term.rows }));
+  };
+
+  ws.onmessage = (ev) => {
+    if (ev.data instanceof ArrayBuffer) {
+      term.write(new Uint8Array(ev.data));
+      return;
+    }
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "info" && msg.message) {
+        term.writeln(`\r\n${msg.message}`);
+      }
+      if (msg.type === "readonly") {
+        setStatus("Read-only", "warn");
+      }
+      if (msg.type === "auth_ok") {
+        setStatus("Live session", "ok");
+      }
+      if (msg.type === "auth_error") {
+        setStatus("Auth failed", "error");
+      }
+    } catch {
+      term.writeln(`\r\n${ev.data}`);
+    }
+  };
+
+  ws.onclose = () => setStatus("Disconnected", "error");
+  ws.onerror = () => setStatus("Connection error", "error");
+
+  term.onData((data) => {
+    ws.send(JSON.stringify({ type: "input", data }));
+  });
+
+  function sendResize() {
+    fitAddon.fit();
+    ws.send(JSON.stringify({ type: "resize", columns: term.cols, rows: term.rows }));
+  }
+
+  window.addEventListener("resize", () => {
+    if (ws.readyState === WebSocket.OPEN) sendResize();
+  });
+  term.onResize(({ cols, rows }) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "resize", columns: cols, rows }));
+    }
+  });
+})();
+</script>
+</body>
+</html>
