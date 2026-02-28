@@ -85,7 +85,7 @@
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.10.0/lib/xterm-addon-fit.min.js"></script>
 <script>
 (() => {
-  const ACK_BATCH_BYTES = 262144;
+  let ackBatchBytes = 262144;
   const ACK_FLUSH_MS = 120;
   const params = new URLSearchParams(window.location.search);
   const token = params.get("token") || "";
@@ -133,7 +133,7 @@
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       return;
     }
-    if (!force && pendingAckBytes < ACK_BATCH_BYTES) {
+    if (!force && pendingAckBytes < ackBatchBytes) {
       ackTimer = setTimeout(() => sendAck(true), ACK_FLUSH_MS);
       return;
     }
@@ -144,7 +144,7 @@
   function queueAck(bytes) {
     if (!bytes || bytes <= 0) return;
     pendingAckBytes += bytes;
-    if (pendingAckBytes >= ACK_BATCH_BYTES) {
+    if (pendingAckBytes >= ackBatchBytes) {
       sendAck(true);
       return;
     }
@@ -201,6 +201,11 @@
       }
       if (msg.type === "auth_ok") {
         setStatus(readonly ? "Read-only" : "Live session", readonly ? "warn" : "ok");
+      }
+      if (msg.type === "prefs") {
+        if (msg.bytes && msg.bytes > 0) {
+          ackBatchBytes = msg.bytes;
+        }
       }
       if (msg.type === "auth_error") {
         setStatus("Auth failed", "error");

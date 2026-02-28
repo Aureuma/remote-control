@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,8 @@ type ServerOptions struct {
 	MaxClients          int
 	LowWatermarkBytes   int64
 	HighWatermarkBytes  int64
+	AckQuantumBytes     int64
+	TokenExpiresAt      time.Time
 	PingInterval        time.Duration
 	ClientReadTimeout   time.Duration
 	OnClientCountChange func(int)
@@ -56,6 +59,8 @@ type Server struct {
 	flowMu sync.Mutex
 	flow   flowController
 
+	tokenExpiresAt    time.Time
+	ackQuantumBytes   int64
 	pingInterval      time.Duration
 	clientReadTimeout time.Duration
 }
@@ -73,6 +78,10 @@ func New(terminal *session.Terminal, token string, opts ServerOptions) *Server {
 	if clientReadTimeout <= 0 {
 		clientReadTimeout = 90 * time.Second
 	}
+	ackQuantumBytes := opts.AckQuantumBytes
+	if ackQuantumBytes <= 0 {
+		ackQuantumBytes = 256 * 1024
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{
@@ -85,17 +94,15 @@ func New(terminal *session.Terminal, token string, opts ServerOptions) *Server {
 		cancel:              cancel,
 		conns:               map[*gws.Conn]struct{}{},
 		flow:                newFlowController(opts.LowWatermarkBytes, opts.HighWatermarkBytes),
+		tokenExpiresAt:      opts.TokenExpiresAt.UTC(),
+		ackQuantumBytes:     ackQuantumBytes,
 		pingInterval:        pingInterval,
 		clientReadTimeout:   clientReadTimeout,
 		upgrader: gws.Upgrader{
 			ReadBufferSize:  4096,
 			WriteBufferSize: 4096,
 			CheckOrigin: func(r *http.Request) bool {
-				origin := strings.TrimSpace(r.Header.Get("Origin"))
-				if origin == "" {
-					return true
-				}
-				return strings.Contains(origin, "localhost") || strings.Contains(origin, "127.0.0.1")
+				return isOriginAllowed(strings.TrimSpace(r.Header.Get("Origin")), strings.TrimSpace(r.Host))
 			},
 		},
 	}
@@ -150,6 +157,7 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 	go s.pingLoop(conn, done)
 
 	_ = conn.WriteMessage(gws.TextMessage, mustJSON(Message{Type: "auth_ok"}))
+	_ = conn.WriteMessage(gws.TextMessage, mustJSON(Message{Type: "prefs", Bytes: s.ackQuantumBytes}))
 	if s.readonly {
 		_ = conn.WriteMessage(gws.TextMessage, mustJSON(Message{Type: "readonly", Message: "🔒 Read-only mode enabled"}))
 	}
@@ -211,6 +219,9 @@ func (s *Server) authenticate(conn *gws.Conn) error {
 	}
 	if msg.Type != "auth" {
 		return errors.New("auth required")
+	}
+	if tokenExpired(s.tokenExpiresAt, time.Now().UTC()) {
+		return errors.New("token expired")
 	}
 	if subtle.ConstantTimeCompare([]byte(msg.Token), []byte(s.token)) != 1 {
 		return errors.New("invalid token")
@@ -384,4 +395,44 @@ func mustJSON(v any) []byte {
 		return []byte(`{"type":"info","message":"serialization error"}`)
 	}
 	return data
+}
+
+func tokenExpired(expiresAt, now time.Time) bool {
+	if expiresAt.IsZero() {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return !now.Before(expiresAt)
+}
+
+func isOriginAllowed(origin, host string) bool {
+	if strings.TrimSpace(origin) == "" {
+		return true
+	}
+	originURL, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	originHost := strings.ToLower(strings.TrimSpace(originURL.Hostname()))
+	if originHost == "" {
+		return false
+	}
+	requestHost := strings.ToLower(strings.TrimSpace(parseHostname(host)))
+	if requestHost != "" && originHost == requestHost {
+		return true
+	}
+	return originHost == "localhost" || originHost == "127.0.0.1" || originHost == "::1"
+}
+
+func parseHostname(host string) string {
+	if strings.TrimSpace(host) == "" {
+		return ""
+	}
+	u, err := url.Parse("//" + host)
+	if err != nil {
+		return strings.TrimSpace(host)
+	}
+	return strings.TrimSpace(u.Hostname())
 }
