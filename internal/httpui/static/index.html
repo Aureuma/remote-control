@@ -85,6 +85,55 @@
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.10.0/lib/xterm-addon-fit.min.js"></script>
 <script>
 (() => {
+  if (window.Terminal && window.FitAddon && window.FitAddon.FitAddon) {
+    return;
+  }
+  class FallbackTerminal {
+    constructor() {
+      this.cols = 80;
+      this.rows = 24;
+      this._onDataHandlers = [];
+      this._onResizeHandlers = [];
+      this._root = null;
+    }
+    loadAddon() {}
+    open(element) {
+      this._root = element;
+      if (!this._root) return;
+      this._root.style.whiteSpace = "pre-wrap";
+      this._root.style.fontFamily = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
+      this._root.style.overflow = "auto";
+      this._root.setAttribute("data-fallback-terminal", "1");
+    }
+    onData(cb) {
+      this._onDataHandlers.push(cb);
+    }
+    onResize(cb) {
+      this._onResizeHandlers.push(cb);
+    }
+    write(data, cb) {
+      if (this._root) {
+        const text = typeof data === "string" ? data : new TextDecoder().decode(data);
+        this._root.textContent += text;
+      }
+      if (typeof cb === "function") cb();
+    }
+    writeln(data) {
+      this.write(String(data || "") + "\n");
+    }
+  }
+  window.Terminal = window.Terminal || FallbackTerminal;
+  if (!window.FitAddon || !window.FitAddon.FitAddon) {
+    window.FitAddon = {
+      FitAddon: class {
+        fit() {}
+      }
+    };
+  }
+})();
+</script>
+<script>
+(() => {
   let ackBatchBytes = 262144;
   const ACK_FLUSH_MS = 120;
   const params = new URLSearchParams(window.location.search);
