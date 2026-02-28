@@ -143,6 +143,7 @@ async function startSession({ readwrite, accessCode, tokenInURL }) {
   let logs = "";
   let resolved = false;
   let shareURL = "";
+  let accessToken = "";
 
   const collect = (chunk) => {
     const text = chunk.toString();
@@ -151,6 +152,10 @@ async function startSession({ readwrite, accessCode, tokenInURL }) {
     if (match && match[1]) {
       shareURL = match[1].trim();
       resolved = true;
+    }
+    const tokenMatch = text.match(/Access Token:\s*(\S+)/);
+    if (tokenMatch && tokenMatch[1]) {
+      accessToken = tokenMatch[1].trim();
     }
   };
   proc.stdout.on("data", collect);
@@ -180,6 +185,7 @@ async function startSession({ readwrite, accessCode, tokenInURL }) {
     id,
     homeDir,
     shareURL,
+    accessToken,
     logs: () => logs,
   };
 }
@@ -287,5 +293,18 @@ test.describe("browser remote control", () => {
     await expect
       .poll(async () => page.locator("#terminal").textContent())
       .toContain("code-auth-ok");
+  });
+
+  test("supports no-token-in-url by prompting for token", async ({ page }) => {
+    session = await startSession({ readwrite: true, tokenInURL: false });
+    await installCDNStubs(page);
+    page.on("dialog", (dialog) => dialog.accept(session.accessToken));
+
+    await page.goto(session.shareURL);
+    await expect(page.locator("#status")).toHaveText(/Live session/i);
+    await page.evaluate(() => window.__emitTerminalData("prompt-token-ok\\n"));
+    await expect
+      .poll(async () => page.locator("#terminal").textContent())
+      .toContain("prompt-token-ok");
   });
 });

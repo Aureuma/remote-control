@@ -121,13 +121,20 @@ func buildInvocation(localURL string, opts Options) ([]string, string, error) {
 	case "ephemeral":
 		return []string{"tunnel", "--url", localURL, "--no-autoupdate"}, "", nil
 	case "named":
-		publicURL, err := normalizePublicURLFromHostname(opts.Hostname)
-		if err != nil {
-			return nil, "", fmt.Errorf("named tunnel requires a valid hostname: %w", err)
+		publicURL := ""
+		if strings.TrimSpace(opts.Hostname) != "" {
+			normalizedURL, err := normalizePublicURLFromHostname(opts.Hostname)
+			if err != nil {
+				return nil, "", fmt.Errorf("named tunnel requires a valid hostname: %w", err)
+			}
+			publicURL = normalizedURL
 		}
 		tunnelToken := strings.TrimSpace(opts.TunnelToken)
 		if tunnelToken != "" {
 			return []string{"tunnel", "run", "--token", tunnelToken}, publicURL, nil
+		}
+		if publicURL == "" {
+			return nil, "", fmt.Errorf("named tunnel requires --tunnel-hostname unless --tunnel-token is provided")
 		}
 		args := []string{"tunnel", "--url", localURL, "--hostname", strings.TrimSpace(opts.Hostname), "--no-autoupdate"}
 		if cfg := strings.TrimSpace(opts.ConfigFile); cfg != "" {
@@ -175,6 +182,8 @@ func waitForProcessStartup(ctx context.Context, cmd *exec.Cmd, timeout time.Dura
 		timeout = 20 * time.Second
 	}
 	deadline := time.Now().Add(timeout)
+	readyAfter := 800 * time.Millisecond
+	startedAt := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
@@ -184,8 +193,11 @@ func waitForProcessStartup(ctx context.Context, cmd *exec.Cmd, timeout time.Dura
 		if !processRunning(cmd.Process) {
 			return fmt.Errorf("cloudflared exited before startup completed")
 		}
-		if time.Now().After(deadline) {
+		if time.Since(startedAt) >= readyAfter {
 			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for cloudflared startup")
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
