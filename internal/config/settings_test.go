@@ -49,6 +49,15 @@ func TestApplyDefaultsFlowAndTunnel(t *testing.T) {
 	if s.Security.TokenInURL == nil || !*s.Security.TokenInURL {
 		t.Fatalf("expected token_in_url default true")
 	}
+	if s.Development.Safari.SSH.HostEnvKey != "SHAWN_MAC_HOST" {
+		t.Fatalf("expected default host env key, got %q", s.Development.Safari.SSH.HostEnvKey)
+	}
+	if s.Development.Safari.SSH.PortEnvKey != "SHAWN_MAC_PORT" {
+		t.Fatalf("expected default port env key, got %q", s.Development.Safari.SSH.PortEnvKey)
+	}
+	if s.Development.Safari.SSH.UserEnvKey != "SHAWN_MAC_USER" {
+		t.Fatalf("expected default user env key, got %q", s.Development.Safari.SSH.UserEnvKey)
+	}
 }
 
 func TestLoadCreatesDefaultSettings(t *testing.T) {
@@ -71,11 +80,33 @@ func TestLoadCreatesDefaultSettings(t *testing.T) {
 	if got.Security.TokenInURL == nil || !*got.Security.TokenInURL {
 		t.Fatalf("expected token_in_url default true")
 	}
+	if got.Development.Safari.SSH.HostEnvKey != "SHAWN_MAC_HOST" {
+		t.Fatalf("expected default host env key, got %q", got.Development.Safari.SSH.HostEnvKey)
+	}
 	if got.Flow.LowWatermarkBytes <= 0 || got.Flow.HighWatermarkBytes <= 0 {
 		t.Fatalf("expected flow defaults")
 	}
 	settingsPath := filepath.Join(home, "settings.toml")
 	if _, err := os.Stat(settingsPath); err != nil {
 		t.Fatalf("expected settings file at %s: %v", settingsPath, err)
+	}
+}
+
+func TestResolveSettingValue(t *testing.T) {
+	t.Setenv("RC_TEST_HOST", "example.local")
+	if got := ResolveSettingValue("", "RC_TEST_HOST"); got != "example.local" {
+		t.Fatalf("env-key resolve mismatch: %q", got)
+	}
+	if got := ResolveSettingValue("${RC_TEST_HOST}", ""); got != "example.local" {
+		t.Fatalf("${} resolve mismatch: %q", got)
+	}
+	if got := ResolveSettingValue("env:RC_TEST_HOST", ""); got != "example.local" {
+		t.Fatalf("env: resolve mismatch: %q", got)
+	}
+	if got := ResolveSettingValue("RC_TEST_HOST", ""); got != "example.local" {
+		t.Fatalf("bare key resolve mismatch: %q", got)
+	}
+	if got := ResolveSettingValue("literal-host", ""); got != "literal-host" {
+		t.Fatalf("literal resolve mismatch: %q", got)
 	}
 }
