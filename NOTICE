@@ -1,0 +1,5 @@
+remote-control clean-room notice
+
+This repository is an original implementation licensed under AGPL-3.0.
+During planning, prior-art terminal-sharing projects were reviewed for behavior
+patterns only. No source files were copied into this repository.
