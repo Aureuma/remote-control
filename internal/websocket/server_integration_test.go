@@ -173,6 +173,40 @@ func TestWSAuthRequiredAndMalformedMessageIgnored(t *testing.T) {
 	expectTextType(t, conn2, "pong", 2*time.Second)
 }
 
+func TestWSAccessCodeRequired(t *testing.T) {
+	term, err := session.StartCommand("cat")
+	if err != nil {
+		t.Fatalf("start command: %v", err)
+	}
+	t.Cleanup(func() { _ = term.Close() })
+
+	wsURL, shutdown := startWSTestServer(t, term, "token-code", ServerOptions{
+		AccessCode:        "2468",
+		PingInterval:      time.Second,
+		ClientReadTimeout: 3 * time.Second,
+	})
+	defer shutdown()
+
+	connMissing := dialAndAuthWithCode(t, wsURL, "token-code", "", nil)
+	defer connMissing.Close()
+	msgMissing := expectTextType(t, connMissing, "auth_error", 2*time.Second)
+	if !strings.Contains(strings.ToLower(msgMissing.Message), "access code") {
+		t.Fatalf("expected access code error, got %q", msgMissing.Message)
+	}
+
+	connWrong := dialAndAuthWithCode(t, wsURL, "token-code", "wrong", nil)
+	defer connWrong.Close()
+	msgWrong := expectTextType(t, connWrong, "auth_error", 2*time.Second)
+	if !strings.Contains(strings.ToLower(msgWrong.Message), "invalid access code") {
+		t.Fatalf("expected invalid access code error, got %q", msgWrong.Message)
+	}
+
+	connOK := dialAndAuthWithCode(t, wsURL, "token-code", "2468", nil)
+	defer connOK.Close()
+	expectTextType(t, connOK, "auth_ok", 2*time.Second)
+	expectTextType(t, connOK, "prefs", 2*time.Second)
+}
+
 func TestWSMaxClientsAndOriginChecks(t *testing.T) {
 	term, err := session.StartCommand("cat")
 	if err != nil {
@@ -247,6 +281,33 @@ func TestWSFlowPauseAndResume(t *testing.T) {
 	expectTextType(t, conn, "flow_resume", 2*time.Second)
 }
 
+func TestWSReconnectAfterClientDisconnect(t *testing.T) {
+	term, err := session.StartCommand("cat")
+	if err != nil {
+		t.Fatalf("start command: %v", err)
+	}
+	t.Cleanup(func() { _ = term.Close() })
+
+	wsURL, shutdown := startWSTestServer(t, term, "token-reconnect", ServerOptions{
+		MaxClients:        1,
+		PingInterval:      time.Second,
+		ClientReadTimeout: 3 * time.Second,
+	})
+	defer shutdown()
+
+	first := dialAndAuth(t, wsURL, "token-reconnect", nil)
+	expectTextType(t, first, "auth_ok", 2*time.Second)
+	expectTextType(t, first, "prefs", 2*time.Second)
+	_ = first.Close()
+
+	time.Sleep(150 * time.Millisecond)
+
+	second := dialAndAuth(t, wsURL, "token-reconnect", nil)
+	defer second.Close()
+	expectTextType(t, second, "auth_ok", 2*time.Second)
+	expectTextType(t, second, "prefs", 2*time.Second)
+}
+
 func startWSTestServer(t *testing.T, term *session.Terminal, token string, opts ServerOptions) (string, func()) {
 	t.Helper()
 	server := New(term, token, opts)
@@ -276,10 +337,16 @@ func dialWS(t *testing.T, wsURL string, header http.Header) *gws.Conn {
 
 func dialAndAuth(t *testing.T, wsURL, token string, header http.Header) *gws.Conn {
 	t.Helper()
+	return dialAndAuthWithCode(t, wsURL, token, "", header)
+}
+
+func dialAndAuthWithCode(t *testing.T, wsURL, token, code string, header http.Header) *gws.Conn {
+	t.Helper()
 	conn := dialWS(t, wsURL, header)
 	authPayload := Message{
 		Type:    "auth",
 		Token:   token,
+		Code:    code,
 		Columns: 80,
 		Rows:    24,
 	}

@@ -107,7 +107,7 @@ function waitForExit(proc, timeoutMs) {
   });
 }
 
-async function startSession({ readwrite }) {
+async function startSession({ readwrite, accessCode, tokenInURL }) {
   ensureBinaryBuilt();
   const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "rc-browser-e2e-"));
   const id = `browser-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
@@ -127,6 +127,12 @@ async function startSession({ readwrite }) {
     "--no-caffeinate",
   ];
   if (readwrite) args.push("--readwrite");
+  if (accessCode) {
+    args.push("--access-code", accessCode);
+  }
+  if (tokenInURL === false) {
+    args.push("--no-token-in-url");
+  }
 
   const proc = spawn(binaryPath, args, {
     cwd: repoRoot,
@@ -268,5 +274,18 @@ test.describe("browser remote control", () => {
       .poll(async () => page2.locator("#terminal").textContent())
       .toContain("another client is already connected");
     await page2.close();
+  });
+
+  test("requires access code when configured", async ({ page }) => {
+    session = await startSession({ readwrite: true, accessCode: "2468" });
+    await installCDNStubs(page);
+    page.on("dialog", (dialog) => dialog.accept("2468"));
+
+    await page.goto(session.shareURL);
+    await expect(page.locator("#status")).toHaveText(/Live session/i);
+    await page.evaluate(() => window.__emitTerminalData("code-auth-ok\\n"));
+    await expect
+      .poll(async () => page.locator("#terminal").textContent())
+      .toContain("code-auth-ok");
   });
 });
