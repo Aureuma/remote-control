@@ -17,15 +17,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/si/remote-control/internal/auth"
-	"github.com/si/remote-control/internal/config"
-	"github.com/si/remote-control/internal/httpui"
-	"github.com/si/remote-control/internal/power/macos"
-	runtimeState "github.com/si/remote-control/internal/runtime"
-	"github.com/si/remote-control/internal/session"
-	"github.com/si/remote-control/internal/tmux"
-	"github.com/si/remote-control/internal/tunnel/cloudflare"
-	ws "github.com/si/remote-control/internal/websocket"
+	"github.com/Aureuma/remote-control/internal/auth"
+	"github.com/Aureuma/remote-control/internal/config"
+	"github.com/Aureuma/remote-control/internal/httpui"
+	"github.com/Aureuma/remote-control/internal/power/macos"
+	runtimeState "github.com/Aureuma/remote-control/internal/runtime"
+	"github.com/Aureuma/remote-control/internal/session"
+	"github.com/Aureuma/remote-control/internal/tmux"
+	"github.com/Aureuma/remote-control/internal/tunnel/cloudflare"
+	ws "github.com/Aureuma/remote-control/internal/websocket"
 )
 
 const usageText = `remote-control commands:

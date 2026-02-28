@@ -1,4 +1,4 @@
-module github.com/si/remote-control
+module github.com/Aureuma/remote-control
 
 go 1.25.0
 
