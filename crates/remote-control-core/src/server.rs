@@ -3,7 +3,7 @@ use std::{
     net::SocketAddr,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -20,7 +20,6 @@ use axum::{
     routing::get,
 };
 use chrono::{DateTime, Utc};
-use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::{
     net::TcpListener,
@@ -30,8 +29,9 @@ use tokio::{
 
 use crate::{
     flow::{FlowController, FlowEvent},
+    power_macos,
     runtime_state::{self, SessionState},
-    session, websocket_support,
+    session, tunnel_cloudflare, websocket_support,
 };
 
 const UI_HTML: &str = include_str!("../../../internal/httpui/static/index.html");
@@ -50,6 +50,18 @@ pub struct RunOptions {
     pub token_in_url: bool,
     pub token_expires_at: DateTime<Utc>,
     pub token: String,
+    pub idle_timeout_seconds: i64,
+    pub enable_tunnel: bool,
+    pub tunnel_required: bool,
+    pub cloudflared_binary: String,
+    pub cloudflare_timeout: Duration,
+    pub tunnel_mode: String,
+    pub tunnel_hostname: String,
+    pub tunnel_name: String,
+    pub tunnel_token: String,
+    pub tunnel_config_file: String,
+    pub tunnel_credentials_file: String,
+    pub enable_caffeinate: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +97,8 @@ struct AppState {
     clients: Arc<Mutex<HashMap<u64, mpsc::UnboundedSender<ServerOutbound>>>>,
     next_client_id: Arc<AtomicU64>,
     session_state: Arc<Mutex<SessionState>>,
+    idle_timeout_seconds: i64,
+    shutdown: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -97,6 +111,7 @@ pub struct RunningServer {
     shutdown_tx: Option<oneshot::Sender<()>>,
     serve_task: JoinHandle<()>,
     terminal_task: JoinHandle<()>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl RunningServer {
@@ -107,6 +122,7 @@ impl RunningServer {
     }
 
     pub async fn shutdown(mut self) -> Result<()> {
+        self.shutdown.store(true, Ordering::Relaxed);
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
@@ -121,7 +137,7 @@ pub async fn run_local_server(term: session::Terminal, opts: RunOptions) -> Resu
     let addr = format!("{}:{}", opts.bind.trim(), opts.port);
     let local_url = format!("http://{addr}/");
     let require_code = !opts.access_code.trim().is_empty();
-    let share_url =
+    let mut share_url =
         crate::app::build_share_url(&local_url, &opts.token, opts.token_in_url, require_code);
 
     let settings_path = crate::config::settings_path()
@@ -146,9 +162,9 @@ pub async fn run_local_server(term: session::Terminal, opts: RunOptions) -> Resu
         tunnel: "local".to_string(),
         started_at: Some(Utc::now()),
         token_expires_at: Some(opts.token_expires_at),
-        idle_timeout_seconds: 0,
-        idle_deadline: None,
-        tunnel_mode: "ephemeral".to_string(),
+        idle_timeout_seconds: opts.idle_timeout_seconds.max(0) as i32,
+        idle_deadline: idle_deadline_from_timeout(opts.idle_timeout_seconds),
+        tunnel_mode: crate::app::normalize_tunnel_mode(&opts.tunnel_mode).to_string(),
         token_in_url: opts.token_in_url,
         access_code_auth: require_code,
         updated_at: None,
@@ -175,7 +191,81 @@ pub async fn run_local_server(term: session::Terminal, opts: RunOptions) -> Resu
         clients: Arc::new(Mutex::new(HashMap::new())),
         next_client_id: Arc::new(AtomicU64::new(1)),
         session_state: Arc::new(Mutex::new(state)),
+        idle_timeout_seconds: opts.idle_timeout_seconds.max(0),
+        shutdown: Arc::new(AtomicBool::new(false)),
     };
+
+    let running = start_server(listener, state.clone()).await?;
+    let mut tunnel_handle = None;
+    let mut caffeinate_handle = None;
+
+    if opts.enable_tunnel {
+        match tunnel_cloudflare::start(&tunnel_cloudflare::Options {
+            binary: opts.cloudflared_binary.clone(),
+            local_url: local_url.trim_end_matches('/').to_string(),
+            startup_timeout: opts.cloudflare_timeout,
+            mode: opts.tunnel_mode.clone(),
+            hostname: opts.tunnel_hostname.clone(),
+            tunnel_name: opts.tunnel_name.clone(),
+            tunnel_token: opts.tunnel_token.clone(),
+            config_file: opts.tunnel_config_file.clone(),
+            credentials_file: opts.tunnel_credentials_file.clone(),
+        }) {
+            Ok(handle) => {
+                let public_url = handle.public_url().trim().to_string();
+                share_url = crate::app::build_share_url(
+                    &public_url,
+                    &opts.token,
+                    opts.token_in_url,
+                    require_code,
+                );
+                {
+                    let mut session = state
+                        .session_state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    session.tunnel = format!(
+                        "cloudflare-{}",
+                        crate::app::normalize_tunnel_mode(&opts.tunnel_mode)
+                    );
+                    session.public_url = public_url.clone();
+                    session.url = public_url;
+                    session.cloudflared_pid = handle.pid() as i32;
+                    let _ = runtime_state::save_session(&session);
+                }
+                tunnel_handle = Some(handle);
+            }
+            Err(err) if opts.tunnel_required => {
+                let _ = terminal.close();
+                let _ = running.shutdown().await;
+                let _ = runtime_state::remove_session(&opts.id);
+                return Err(err);
+            }
+            Err(err) => {
+                eprintln!("Tunnel unavailable; continuing in local mode: {err}");
+            }
+        }
+    }
+
+    if opts.enable_caffeinate {
+        match power_macos::start() {
+            Ok(Some(handle)) => {
+                {
+                    let mut session = state
+                        .session_state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    session.caffeinate_pid = handle.pid() as i32;
+                    let _ = runtime_state::save_session(&session);
+                }
+                caffeinate_handle = Some(handle);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                eprintln!("Could not start caffeinate: {err}");
+            }
+        }
+    }
 
     println!("SI remote-control is live");
     println!("Session ID: {}", opts.id);
@@ -188,6 +278,9 @@ pub async fn run_local_server(term: session::Terminal, opts: RunOptions) -> Resu
         println!("Access Code: {}", opts.access_code);
     }
     println!("Token expires: {}", opts.token_expires_at.to_rfc3339());
+    if let Some(public_url) = tunnel_handle.as_ref().map(|handle| handle.public_url()) {
+        println!("Tunnel URL: {public_url}");
+    }
     println!(
         "Mode: {}",
         if opts.readonly {
@@ -196,10 +289,17 @@ pub async fn run_local_server(term: session::Terminal, opts: RunOptions) -> Resu
             "read-write"
         }
     );
+    if opts.idle_timeout_seconds > 0 {
+        println!("Idle timeout: {}s", opts.idle_timeout_seconds);
+    }
     println!("Open the URL in Chrome or Safari.");
     println!("Press Ctrl+C to stop sharing.");
 
-    let running = start_server(listener, state.clone()).await?;
+    let mut idle_task = if opts.idle_timeout_seconds > 0 {
+        Some(tokio::spawn(watch_idle_timeout(state.clone())))
+    } else {
+        None
+    };
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
@@ -209,10 +309,22 @@ pub async fn run_local_server(term: session::Terminal, opts: RunOptions) -> Resu
         }) => {
             result??;
         }
+        _ = async {
+            if let Some(task) = idle_task.take() {
+                let _ = task.await;
+            }
+        } => {
+            println!("Idle timeout reached. Session stopped.");
+        }
     }
 
-    running.shutdown().await?;
+    if let Some(task) = idle_task.take() {
+        task.abort();
+    }
     let _ = terminal.close();
+    running.shutdown().await?;
+    drop(caffeinate_handle);
+    drop(tunnel_handle);
     let _ = runtime_state::remove_session(&opts.id);
     Ok(0)
 }
@@ -245,6 +357,7 @@ async fn start_server(listener: TcpListener, state: AppState) -> Result<RunningS
         shutdown_tx: Some(shutdown_tx),
         serve_task,
         terminal_task,
+        shutdown: state.shutdown.clone(),
     })
 }
 
@@ -285,12 +398,10 @@ async fn ws_handler(
         .into_response()
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState, _addr: SocketAddr) {
-    let (mut sender, mut receiver) = socket.split();
-
-    let auth_payload = tokio::time::timeout(Duration::from_secs(20), receiver.next()).await;
+async fn handle_socket(mut socket: WebSocket, state: AppState, _addr: SocketAddr) {
+    let auth_payload = tokio::time::timeout(Duration::from_secs(20), socket.recv()).await;
     let Some(Ok(WsMessage::Text(text))) = auth_payload.ok().flatten() else {
-        let _ = sender
+        let _ = socket
             .send(WsMessage::Text(
                 serde_json::to_string(&Message {
                     kind: "auth_error".to_string(),
@@ -310,7 +421,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, _addr: SocketAddr) {
     };
 
     let Ok(auth) = serde_json::from_str::<Message>(&text) else {
-        let _ = sender
+        let _ = socket
             .send(WsMessage::Text(
                 serde_json::to_string(&Message {
                     kind: "auth_error".to_string(),
@@ -330,7 +441,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, _addr: SocketAddr) {
     };
 
     if auth.kind != "auth" {
-        let _ = sender
+        let _ = socket
             .send(WsMessage::Text(
                 serde_json::to_string(&Message {
                     kind: "auth_error".to_string(),
@@ -349,7 +460,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, _addr: SocketAddr) {
         return;
     }
     if websocket_support::token_expired(Some(state.token_expires_at), Some(Utc::now())) {
-        let _ = sender
+        let _ = socket
             .send(WsMessage::Text(
                 serde_json::to_string(&Message {
                     kind: "auth_error".to_string(),
@@ -368,7 +479,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, _addr: SocketAddr) {
         return;
     }
     if auth.token != state.token {
-        let _ = sender
+        let _ = socket
             .send(WsMessage::Text(
                 serde_json::to_string(&Message {
                     kind: "auth_error".to_string(),
@@ -388,7 +499,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, _addr: SocketAddr) {
     }
     if !state.access_code.trim().is_empty() {
         if auth.code.trim().is_empty() {
-            let _ = sender
+            let _ = socket
                 .send(WsMessage::Text(
                     serde_json::to_string(&Message {
                         kind: "auth_error".to_string(),
@@ -407,7 +518,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, _addr: SocketAddr) {
             return;
         }
         if auth.code.trim() != state.access_code.trim() {
-            let _ = sender
+            let _ = socket
                 .send(WsMessage::Text(
                     serde_json::to_string(&Message {
                         kind: "auth_error".to_string(),
@@ -440,7 +551,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, _addr: SocketAddr) {
         clients.len() >= state.max_clients
     };
     if at_limit {
-        let _ = sender
+        let _ = socket
             .send(WsMessage::Text(
                 serde_json::to_string(&Message {
                     kind: "info".to_string(),
@@ -456,7 +567,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, _addr: SocketAddr) {
                 .into(),
             ))
             .await;
-        let _ = sender.send(WsMessage::Close(None)).await;
+        let _ = socket.send(WsMessage::Close(None)).await;
         return;
     }
     state
@@ -466,7 +577,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, _addr: SocketAddr) {
         .insert(client_id, tx);
     update_client_count(&state);
 
-    let _ = sender
+    if let Err(err) = socket
         .send(WsMessage::Text(
             serde_json::to_string(&Message {
                 kind: "auth_ok".to_string(),
@@ -481,8 +592,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, _addr: SocketAddr) {
             .unwrap()
             .into(),
         ))
-        .await;
-    let _ = sender
+        .await
+    {
+        eprintln!("ws send auth_ok failed: {err}");
+    }
+    if let Err(err) = socket
         .send(WsMessage::Text(
             serde_json::to_string(&Message {
                 kind: "prefs".to_string(),
@@ -497,9 +611,12 @@ async fn handle_socket(socket: WebSocket, state: AppState, _addr: SocketAddr) {
             .unwrap()
             .into(),
         ))
-        .await;
+        .await
+    {
+        eprintln!("ws send prefs failed: {err}");
+    }
     if state.readonly {
-        let _ = sender
+        if let Err(err) = socket
             .send(WsMessage::Text(
                 serde_json::to_string(&Message {
                     kind: "readonly".to_string(),
@@ -514,52 +631,52 @@ async fn handle_socket(socket: WebSocket, state: AppState, _addr: SocketAddr) {
                 .unwrap()
                 .into(),
             ))
-            .await;
+            .await
+        {
+            eprintln!("ws send readonly failed: {err}");
+        }
     }
 
-    let send_task = tokio::spawn(async move {
-        while let Some(message) = rx.recv().await {
-            match message {
-                ServerOutbound::Text(payload) => {
-                    let _ = sender
-                        .send(WsMessage::Text(
-                            serde_json::to_string(&payload).unwrap().into(),
-                        ))
-                        .await;
-                }
-                ServerOutbound::Binary(data) => {
-                    let _ = sender.send(WsMessage::Binary(data.into())).await;
-                }
-            }
-        }
-    });
-
-    while let Some(Ok(message)) = receiver.next().await {
-        match message {
-            WsMessage::Text(text) => {
-                if let Ok(payload) = serde_json::from_str::<Message>(&text) {
-                    handle_client_message(&state, client_id, payload);
+    loop {
+        tokio::select! {
+            outbound = rx.recv() => {
+                let Some(outbound) = outbound else { break; };
+                match outbound {
+                    ServerOutbound::Text(payload) => {
+                        let _ = socket.send(WsMessage::Text(serde_json::to_string(&payload).unwrap().into())).await;
+                    }
+                    ServerOutbound::Binary(data) => {
+                        let _ = socket.send(WsMessage::Binary(data.into())).await;
+                    }
                 }
             }
-            WsMessage::Binary(_) => {}
-            WsMessage::Close(_) => break,
-            WsMessage::Ping(data) => {
-                broadcast_one(
-                    &state,
-                    client_id,
-                    ServerOutbound::Text(Message {
-                        kind: "pong".to_string(),
-                        token: String::new(),
-                        code: String::new(),
-                        data: String::from_utf8_lossy(&data).to_string(),
-                        columns: None,
-                        rows: None,
-                        bytes: None,
-                        message: String::new(),
-                    }),
-                );
+            inbound = socket.recv() => {
+                let Some(Ok(message)) = inbound else { break; };
+                match message {
+                    WsMessage::Text(text) => {
+                        if let Ok(payload) = serde_json::from_str::<Message>(&text) {
+                            handle_client_message(&state, client_id, payload);
+                        }
+                    }
+                    WsMessage::Binary(_) => {}
+                    WsMessage::Close(_) => break,
+                    WsMessage::Ping(data) => {
+                        let _ = socket.send(WsMessage::Text(
+                            serde_json::to_string(&Message {
+                                kind: "pong".to_string(),
+                                token: String::new(),
+                                code: String::new(),
+                                data: String::from_utf8_lossy(&data).to_string(),
+                                columns: None,
+                                rows: None,
+                                bytes: None,
+                                message: String::new(),
+                            }).unwrap().into()
+                        )).await;
+                    }
+                    WsMessage::Pong(_) => {}
+                }
             }
-            WsMessage::Pong(_) => {}
         }
     }
 
@@ -583,7 +700,6 @@ async fn handle_socket(socket: WebSocket, state: AppState, _addr: SocketAddr) {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .reset();
     }
-    send_task.abort();
 }
 
 fn handle_client_message(state: &AppState, client_id: u64, message: Message) {
@@ -659,6 +775,9 @@ fn handle_client_message(state: &AppState, client_id: u64, message: Message) {
 fn terminal_read_loop(state: AppState) -> Result<()> {
     let mut buf = [0_u8; 4096];
     loop {
+        if state.shutdown.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         {
             let clients = state
                 .clients
@@ -744,5 +863,40 @@ fn update_client_count(state: &AppState) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     session.client_count = count;
+    session.idle_deadline = if state.idle_timeout_seconds > 0 && count == 0 {
+        idle_deadline_from_timeout(state.idle_timeout_seconds)
+    } else {
+        None
+    };
     let _ = runtime_state::save_session(&session);
+}
+
+fn idle_deadline_from_timeout(timeout_seconds: i64) -> Option<DateTime<Utc>> {
+    if timeout_seconds <= 0 {
+        return None;
+    }
+    Some(Utc::now() + chrono::Duration::seconds(timeout_seconds))
+}
+
+async fn watch_idle_timeout(state: AppState) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let idle_deadline = {
+            let session = state
+                .session_state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if session.client_count > 0 {
+                None
+            } else {
+                session.idle_deadline
+            }
+        };
+        let Some(idle_deadline) = idle_deadline else {
+            continue;
+        };
+        if Utc::now() >= idle_deadline {
+            return;
+        }
+    }
 }
