@@ -112,6 +112,7 @@ pub struct RunningServer {
     serve_task: JoinHandle<()>,
     terminal_task: JoinHandle<()>,
     shutdown: Arc<AtomicBool>,
+    terminal: Arc<session::Terminal>,
 }
 
 impl RunningServer {
@@ -123,6 +124,7 @@ impl RunningServer {
 
     pub async fn shutdown(mut self) -> Result<()> {
         self.shutdown.store(true, Ordering::Relaxed);
+        let _ = self.terminal.close();
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
@@ -358,6 +360,7 @@ async fn start_server(listener: TcpListener, state: AppState) -> Result<RunningS
         serve_task,
         terminal_task,
         shutdown: state.shutdown.clone(),
+        terminal: state.terminal.clone(),
     })
 }
 
@@ -897,6 +900,352 @@ async fn watch_idle_timeout(state: AppState) {
         };
         if Utc::now() >= idle_deadline {
             return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration as StdDuration;
+
+    use chrono::Utc;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::net::TcpListener;
+    use tokio::time::timeout;
+    use tokio_tungstenite::{
+        connect_async,
+        tungstenite::{
+            Message as ClientWsMessage,
+            client::IntoClientRequest,
+            http::{HeaderValue, header::ORIGIN},
+        },
+    };
+
+    use crate::{
+        flow::FlowController,
+        runtime_state::SessionState,
+        session::{self, Mode},
+    };
+
+    use super::{AppState, Message, start_server};
+
+    fn make_state(
+        term: session::Terminal,
+        token: &str,
+        readonly: bool,
+        max_clients: usize,
+    ) -> AppState {
+        let mode = match term.mode() {
+            Mode::Attach => "attach".to_string(),
+            Mode::Cmd => "cmd".to_string(),
+            Mode::Tty => "tty".to_string(),
+        };
+        let source = term.source().to_string();
+        AppState {
+            terminal: Arc::new(term),
+            token: token.to_string(),
+            readonly,
+            max_clients,
+            access_code: String::new(),
+            token_expires_at: Utc::now() + chrono::Duration::hours(1),
+            ack_quantum_bytes: 12345,
+            flow: Arc::new(Mutex::new(FlowController::new(512 * 1024, 2 * 1024 * 1024))),
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            next_client_id: Arc::new(AtomicU64::new(1)),
+            session_state: Arc::new(Mutex::new(SessionState {
+                id: "test".to_string(),
+                mode,
+                source,
+                ..SessionState::default()
+            })),
+            idle_timeout_seconds: 0,
+            shutdown: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    async fn connect_client(
+        ws_url: &str,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
+        let mut request = ws_url.into_client_request().unwrap();
+        let origin = ws_url.replace("ws://", "http://").replace("/ws", "");
+        request
+            .headers_mut()
+            .insert(ORIGIN, HeaderValue::from_str(&origin).unwrap());
+        let (socket, _) = connect_async(request).await.unwrap();
+        socket
+    }
+
+    async fn send_auth(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        token: &str,
+    ) {
+        socket
+            .send(ClientWsMessage::Text(
+                serde_json::to_string(&Message {
+                    kind: "auth".to_string(),
+                    token: token.to_string(),
+                    code: String::new(),
+                    data: String::new(),
+                    columns: Some(80),
+                    rows: Some(24),
+                    bytes: None,
+                    message: String::new(),
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+    }
+
+    async fn next_text(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> Message {
+        let deadline = tokio::time::Instant::now() + StdDuration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            let message = timeout(StdDuration::from_secs(5), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            match message {
+                ClientWsMessage::Text(text) => return serde_json::from_str(&text).unwrap(),
+                ClientWsMessage::Binary(_) => {}
+                other => panic!("expected text or binary frame, got {:?}", other),
+            }
+        }
+        panic!("timed out waiting for text frame");
+    }
+
+    async fn next_binary_contains(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        needle: &str,
+    ) {
+        let deadline = tokio::time::Instant::now() + StdDuration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            let message = timeout(StdDuration::from_secs(5), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            if let ClientWsMessage::Binary(data) = message {
+                let payload = String::from_utf8_lossy(&data);
+                if payload.contains(needle) {
+                    return;
+                }
+            }
+        }
+        panic!(
+            "timed out waiting for binary payload containing {:?}",
+            needle
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_auth_and_prefs_match_expected_protocol() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let runtime_dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("SI_REMOTE_CONTROL_RUNTIME_DIR", runtime_dir.path());
+        }
+        let term = session::Terminal::start_command(
+            "printf 'ready\\n'; while IFS= read -r line; do echo \"ECHO:$line\"; done",
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let state = make_state(term, "token-good", false, 1);
+        let server = start_server(listener, state).await.unwrap();
+        let ws_url = format!("ws://{}/ws", addr);
+
+        let mut socket = connect_client(&ws_url).await;
+        send_auth(&mut socket, "token-good").await;
+
+        let auth_ok = next_text(&mut socket).await;
+        assert_eq!(auth_ok.kind, "auth_ok");
+        let prefs = next_text(&mut socket).await;
+        assert_eq!(prefs.kind, "prefs");
+        assert_eq!(prefs.bytes, Some(12345));
+
+        socket.close(None).await.unwrap();
+        server.shutdown().await.unwrap();
+        unsafe {
+            std::env::remove_var("SI_REMOTE_CONTROL_RUNTIME_DIR");
+        }
+    }
+
+    #[tokio::test]
+    async fn websocket_input_streams_terminal_output() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let runtime_dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("SI_REMOTE_CONTROL_RUNTIME_DIR", runtime_dir.path());
+        }
+        let term = session::Terminal::start_command(
+            "printf 'ready\\n'; while IFS= read -r line; do echo \"ECHO:$line\"; done",
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let state = make_state(term, "token-good", false, 1);
+        let server = start_server(listener, state).await.unwrap();
+        let ws_url = format!("ws://{}/ws", addr);
+
+        let mut socket = connect_client(&ws_url).await;
+        send_auth(&mut socket, "token-good").await;
+        let _ = next_text(&mut socket).await;
+        let _ = next_text(&mut socket).await;
+        socket
+            .send(ClientWsMessage::Text(
+                serde_json::to_string(&Message {
+                    kind: "input".to_string(),
+                    token: String::new(),
+                    code: String::new(),
+                    data: "hello-from-websocket\n".to_string(),
+                    columns: None,
+                    rows: None,
+                    bytes: None,
+                    message: String::new(),
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+
+        next_binary_contains(&mut socket, "ECHO:hello-from-websocket").await;
+        socket.close(None).await.unwrap();
+        server.shutdown().await.unwrap();
+        unsafe {
+            std::env::remove_var("SI_REMOTE_CONTROL_RUNTIME_DIR");
+        }
+    }
+
+    #[tokio::test]
+    async fn websocket_readonly_blocks_input() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let runtime_dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("SI_REMOTE_CONTROL_RUNTIME_DIR", runtime_dir.path());
+        }
+        let term = session::Terminal::start_command(
+            "printf 'ready\\n'; while IFS= read -r line; do echo \"ECHO:$line\"; done",
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let state = make_state(term, "token-good", true, 1);
+        let server = start_server(listener, state).await.unwrap();
+        let ws_url = format!("ws://{}/ws", addr);
+
+        let mut socket = connect_client(&ws_url).await;
+        send_auth(&mut socket, "token-good").await;
+        let _ = next_text(&mut socket).await;
+        let _ = next_text(&mut socket).await;
+        let readonly = next_text(&mut socket).await;
+        assert_eq!(readonly.kind, "readonly");
+
+        socket
+            .send(ClientWsMessage::Text(
+                serde_json::to_string(&Message {
+                    kind: "input".to_string(),
+                    token: String::new(),
+                    code: String::new(),
+                    data: "blocked\n".to_string(),
+                    columns: None,
+                    rows: None,
+                    bytes: None,
+                    message: String::new(),
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let blocked = next_text(&mut socket).await;
+        assert_eq!(blocked.kind, "readonly");
+        assert!(
+            blocked
+                .message
+                .to_ascii_lowercase()
+                .contains("input blocked")
+        );
+
+        socket.close(None).await.unwrap();
+        server.shutdown().await.unwrap();
+        unsafe {
+            std::env::remove_var("SI_REMOTE_CONTROL_RUNTIME_DIR");
+        }
+    }
+
+    #[tokio::test]
+    async fn websocket_rejects_invalid_token_and_second_client() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let runtime_dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("SI_REMOTE_CONTROL_RUNTIME_DIR", runtime_dir.path());
+        }
+        let term = session::Terminal::start_command(
+            "printf 'ready\\n'; while IFS= read -r line; do echo \"ECHO:$line\"; done",
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let state = make_state(term, "token-good", false, 1);
+        let server = start_server(listener, state).await.unwrap();
+        let ws_url = format!("ws://{}/ws", addr);
+
+        let mut invalid = connect_client(&ws_url).await;
+        send_auth(&mut invalid, "token-bad").await;
+        let auth_error = next_text(&mut invalid).await;
+        assert_eq!(auth_error.kind, "auth_error");
+        assert!(
+            auth_error
+                .message
+                .to_ascii_lowercase()
+                .contains("invalid token")
+        );
+        invalid.close(None).await.unwrap();
+
+        let mut first = connect_client(&ws_url).await;
+        send_auth(&mut first, "token-good").await;
+        let _ = next_text(&mut first).await;
+        let _ = next_text(&mut first).await;
+
+        let mut second = connect_client(&ws_url).await;
+        send_auth(&mut second, "token-good").await;
+        let limited = next_text(&mut second).await;
+        assert_eq!(limited.kind, "info");
+        assert!(
+            limited
+                .message
+                .to_ascii_lowercase()
+                .contains("another client is already connected")
+        );
+
+        second.close(None).await.unwrap();
+        first.close(None).await.unwrap();
+        server.shutdown().await.unwrap();
+        unsafe {
+            std::env::remove_var("SI_REMOTE_CONTROL_RUNTIME_DIR");
         }
     }
 }
