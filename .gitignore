@@ -3,5 +3,7 @@
 .tmp/
 node_modules/
 test-results/
+target/
+tickets/
 .DS_Store
 *.log
