@@ -3,6 +3,9 @@ pub mod auth;
 pub mod config;
 pub mod flow;
 pub mod runtime_state;
+pub mod tmux;
+pub mod ttydiscover;
+pub mod tunnel_cloudflare;
 
 #[cfg(test)]
 pub(crate) mod test_support;
