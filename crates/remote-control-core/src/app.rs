@@ -1,6 +1,7 @@
 use std::{
     ffi::OsString,
     io::{self, Write},
+    time::Duration,
 };
 
 use anyhow::Result;
@@ -9,8 +10,10 @@ use nix::{
     unistd::Pid,
 };
 
+use chrono::Utc;
+
 use crate::runtime_state::{self, SessionState};
-use crate::{session, tmux, ttydiscover};
+use crate::{auth, server, session, tmux, ttydiscover};
 
 const USAGE_TEXT: &str = "remote-control commands:\n  remote-control sessions [--all]\n  remote-control attach [--tmux-session <name> | --tty-path <path>] [--port <n>] [--bind <addr>] [--readwrite] [--tunnel|--no-tunnel]\n  remote-control start --cmd \"<command>\" [--port <n>] [--bind <addr>] [--readwrite] [--tunnel|--no-tunnel]\n  remote-control status\n  remote-control stop [--id <session-id>]\n";
 
@@ -127,21 +130,42 @@ fn cmd_attach(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -
         return Ok(1);
     }
 
+    let bind = value_for_flag(args, "--bind").unwrap_or_else(|| "127.0.0.1".to_string());
+    let port = value_for_flag(args, "--port")
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(8080);
+    let readonly = !has_flag(args, "--readwrite");
+    let access_code = value_for_flag(args, "--access-code").unwrap_or_default();
+    let token_in_url = !has_flag(args, "--no-token-in-url");
+    let id = value_for_flag(args, "--id").unwrap_or_else(default_session_id);
+    let issued = auth::new_token_with_ttl(Duration::from_secs(3600))?;
+
     if let Some(path) = tty_path {
-        match session::Terminal::start_tty_path(&path) {
-            Ok(term) => {
-                let _ = term.close();
-            }
+        let term = match session::Terminal::start_tty_path(&path) {
+            Ok(term) => term,
             Err(err) => {
                 writeln!(stderr, "error: Could not attach tty path \"{path}\": {err}")?;
                 return Ok(1);
             }
-        }
-        writeln!(
-            stderr,
-            "error: attach session startup works, but the Rust server layer is not ported yet"
-        )?;
-        return Ok(1);
+        };
+        let runtime = tokio::runtime::Runtime::new()?;
+        return runtime.block_on(server::run_local_server(
+            term,
+            server::RunOptions {
+                id,
+                bind,
+                port,
+                readonly,
+                max_clients: 1,
+                flow_low_bytes: 512 * 1024,
+                flow_high_bytes: 2 * 1024 * 1024,
+                flow_ack_bytes: 256 * 1024,
+                access_code,
+                token_in_url,
+                token_expires_at: issued.expires_at,
+                token: issued.value,
+            },
+        ));
     }
 
     let sessions = match tmux::list_sessions() {
@@ -174,10 +198,8 @@ fn cmd_attach(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -
         return Ok(1);
     }
 
-    match session::Terminal::start_attach(&name) {
-        Ok(term) => {
-            let _ = term.close();
-        }
+    let term = match session::Terminal::start_attach(&name) {
+        Ok(term) => term,
         Err(err) => {
             writeln!(
                 stderr,
@@ -185,12 +207,25 @@ fn cmd_attach(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -
             )?;
             return Ok(1);
         }
-    }
-    writeln!(
-        stderr,
-        "error: attach session startup works, but the Rust server layer is not ported yet"
-    )?;
-    Ok(1)
+    };
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(server::run_local_server(
+        term,
+        server::RunOptions {
+            id,
+            bind,
+            port,
+            readonly,
+            max_clients: 1,
+            flow_low_bytes: 512 * 1024,
+            flow_high_bytes: 2 * 1024 * 1024,
+            flow_ack_bytes: 256 * 1024,
+            access_code,
+            token_in_url,
+            token_expires_at: issued.expires_at,
+            token: issued.value,
+        },
+    ))
 }
 
 fn cmd_start(args: &[String], _stdout: &mut dyn Write, stderr: &mut dyn Write) -> Result<i32> {
@@ -205,27 +240,48 @@ fn cmd_start(args: &[String], _stdout: &mut dyn Write, stderr: &mut dyn Write) -
         writeln!(stderr, "error: --cmd is required")?;
         return Ok(1);
     }
-    if let Some(port) = value_for_flag(args, "--port") {
+    let port_value = value_for_flag(args, "--port");
+    if let Some(port) = port_value.as_ref() {
         let parsed = port.parse::<u32>().ok();
         if !matches!(parsed, Some(1..=65535)) {
             writeln!(stderr, "error: invalid --port value {port}")?;
             return Ok(1);
         }
     }
-    match session::Terminal::start_command(&command) {
-        Ok(term) => {
-            let _ = term.close();
-        }
+    let bind = value_for_flag(args, "--bind").unwrap_or_else(|| "127.0.0.1".to_string());
+    let port = port_value
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(8080);
+    let readonly = !has_flag(args, "--readwrite");
+    let access_code = value_for_flag(args, "--access-code").unwrap_or_default();
+    let token_in_url = !has_flag(args, "--no-token-in-url");
+    let id = value_for_flag(args, "--id").unwrap_or_else(default_session_id);
+    let issued = auth::new_token_with_ttl(Duration::from_secs(3600))?;
+    let term = match session::Terminal::start_command(&command) {
+        Ok(term) => term,
         Err(err) => {
             writeln!(stderr, "error: Could not start command session: {err}")?;
             return Ok(1);
         }
-    }
-    writeln!(
-        stderr,
-        "error: command session startup works, but the Rust server layer is not ported yet"
-    )?;
-    Ok(1)
+    };
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(server::run_local_server(
+        term,
+        server::RunOptions {
+            id,
+            bind,
+            port,
+            readonly,
+            max_clients: 1,
+            flow_low_bytes: 512 * 1024,
+            flow_high_bytes: 2 * 1024 * 1024,
+            flow_ack_bytes: 256 * 1024,
+            access_code,
+            token_in_url,
+            token_expires_at: issued.expires_at,
+            token: issued.value,
+        },
+    ))
 }
 
 fn cmd_status(stdout: &mut dyn Write, stderr: &mut dyn Write) -> Result<i32> {
@@ -408,6 +464,14 @@ fn value_for_flag(args: &[String], flag: &str) -> Option<String> {
 
 fn has_help(args: &[String]) -> bool {
     args.iter().any(|arg| arg == "--help" || arg == "-h")
+}
+
+fn has_flag(args: &[String], flag: &str) -> bool {
+    args.iter().any(|arg| arg == flag)
+}
+
+fn default_session_id() -> String {
+    format!("rc-{}", Utc::now().timestamp())
 }
 
 #[cfg(test)]
