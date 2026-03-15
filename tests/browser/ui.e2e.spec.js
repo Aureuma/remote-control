@@ -215,6 +215,22 @@ async function stopSession(session) {
   fs.rmSync(session.homeDir, { recursive: true, force: true });
 }
 
+async function waitForClientCount(session, expectedCount) {
+  await expect
+    .poll(() => {
+      const result = spawnSync(binaryPath, ["status"], {
+        cwd: repoRoot,
+        env: { ...process.env, SI_REMOTE_CONTROL_HOME: session.homeDir },
+        encoding: "utf8",
+      });
+      if (result.status !== 0) {
+        return "";
+      }
+      return `${result.stdout}\n${result.stderr}`;
+    }, { timeout: 15000 })
+    .toContain(`clients=${expectedCount}`);
+}
+
 async function installCDNStubs(page) {
   await page.route(stubCSSURL, (route) =>
     route.fulfill({
@@ -278,7 +294,7 @@ test.describe("browser remote control", () => {
     session = await startSession({ readwrite: true });
     await installCDNStubs(page);
     await page.goto(session.shareURL);
-    await expect(page.locator("#status")).toHaveText(/Live session/i);
+    await waitForClientCount(session, 1);
 
     const page2 = await browser.newPage();
     await installCDNStubs(page2);
