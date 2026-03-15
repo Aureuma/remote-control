@@ -31,6 +31,12 @@ jobs:
       - name: Run cargo test
         run: cargo test
 
+      - name: Build native release binary
+        run: cargo build --release -p remote-control
+
+      - name: Smoke test native release binary
+        run: ./scripts/remote_control_smoke.sh ./target/release/remote-control "ci-${{ matrix.os }}" 18182
+
   browser-e2e:
     name: Browser E2E (${{ matrix.browser }})
     runs-on: ubuntu-latest
