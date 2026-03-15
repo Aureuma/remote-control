@@ -260,42 +260,7 @@ impl Runner {
         self.run_scp(&safari_out, &format!("{addr}:{remote_dir}/rc-safari-smoke"))
             .context("copy rc-safari-smoke binary")?;
 
-        let mut remote_args = vec![
-            "./rc-safari-smoke".to_string(),
-            "--remote-control-bin".to_string(),
-            "./remote-control".to_string(),
-            "--scenarios".to_string(),
-            self.cfg.scenario_csv.clone(),
-            "--driver-timeout".to_string(),
-            format_duration(self.cfg.driver_startup),
-            "--scenario-timeout".to_string(),
-            format_duration(self.cfg.scenario_timeout),
-            "--bind".to_string(),
-            self.cfg.bind.clone(),
-            "--no-ssh".to_string(),
-        ];
-        if self.cfg.keep_artifacts {
-            remote_args.push("--keep-artifacts".to_string());
-        }
-        if self.cfg.verbose {
-            remote_args.push("--verbose".to_string());
-        }
-        if !self.cfg.safaridriver_bin.trim().is_empty() {
-            remote_args.push("--safaridriver-bin".to_string());
-            remote_args.push(self.cfg.safaridriver_bin.clone());
-        }
-        if self.cfg.safaridriver_port > 0 {
-            remote_args.push("--safaridriver-port".to_string());
-            remote_args.push(self.cfg.safaridriver_port.to_string());
-        }
-
-        let command = [
-            "set -e".to_string(),
-            format!("cd {}", shell_quote(&remote_dir)),
-            "chmod +x ./remote-control ./rc-safari-smoke".to_string(),
-            shell_join(&remote_args),
-        ]
-        .join(" && ");
+        let command = build_remote_smoke_command(&self.cfg, &remote_dir);
 
         println!(
             "Running Safari smoke over SSH on {}:{} ({})",
@@ -364,11 +329,7 @@ impl Runner {
         let output = self
             .run_ssh_command_output(addr, "uname -m")
             .context("probe remote architecture")?;
-        match output.trim() {
-            "x86_64" | "amd64" => Ok("amd64"),
-            "arm64" | "aarch64" => Ok("arm64"),
-            other => bail!("unsupported remote architecture {:?}", other),
-        }
+        normalize_remote_arch(&output)
     }
 
     fn run_ssh_command(&self, addr: &str, remote_command: &str) -> Result<()> {
@@ -1073,6 +1034,14 @@ fn target_triple_for_arch(arch: &str) -> Result<&'static str> {
     }
 }
 
+fn normalize_remote_arch(raw: &str) -> Result<&'static str> {
+    match raw.trim() {
+        "x86_64" | "amd64" => Ok("amd64"),
+        "arm64" | "aarch64" => Ok("arm64"),
+        other => bail!("unsupported remote architecture {:?}", other),
+    }
+}
+
 fn ensure_rust_target(target: &str) -> Result<()> {
     let status = Command::new("rustup")
         .args(["target", "add", target])
@@ -1173,6 +1142,48 @@ fn shell_join(args: &[String]) -> String {
         .join(" ")
 }
 
+fn build_remote_smoke_args(cfg: &CliConfig) -> Vec<String> {
+    let mut remote_args = vec![
+        "./rc-safari-smoke".to_string(),
+        "--remote-control-bin".to_string(),
+        "./remote-control".to_string(),
+        "--scenarios".to_string(),
+        cfg.scenario_csv.clone(),
+        "--driver-timeout".to_string(),
+        format_duration(cfg.driver_startup),
+        "--scenario-timeout".to_string(),
+        format_duration(cfg.scenario_timeout),
+        "--bind".to_string(),
+        cfg.bind.clone(),
+        "--no-ssh".to_string(),
+    ];
+    if cfg.keep_artifacts {
+        remote_args.push("--keep-artifacts".to_string());
+    }
+    if cfg.verbose {
+        remote_args.push("--verbose".to_string());
+    }
+    if !cfg.safaridriver_bin.trim().is_empty() {
+        remote_args.push("--safaridriver-bin".to_string());
+        remote_args.push(cfg.safaridriver_bin.clone());
+    }
+    if cfg.safaridriver_port > 0 {
+        remote_args.push("--safaridriver-port".to_string());
+        remote_args.push(cfg.safaridriver_port.to_string());
+    }
+    remote_args
+}
+
+fn build_remote_smoke_command(cfg: &CliConfig, remote_dir: &str) -> String {
+    [
+        "set -e".to_string(),
+        format!("cd {}", shell_quote(remote_dir)),
+        "chmod +x ./remote-control ./rc-safari-smoke".to_string(),
+        shell_join(&build_remote_smoke_args(cfg)),
+    ]
+    .join(" && ")
+}
+
 fn value_for_flag(args: &[String], flag: &str) -> Option<String> {
     args.windows(2)
         .find(|window| window[0] == flag)
@@ -1236,10 +1247,12 @@ fn extract_wd_error(status: u16, raw: &Value) -> Option<WdError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_wd_error, format_duration, parse_duration, parse_labeled_value, resolve_scenarios,
-        session_id, shell_join, shell_quote,
+        build_remote_smoke_args, build_remote_smoke_command, extract_wd_error, format_duration,
+        normalize_remote_arch, parse_duration, parse_labeled_value, resolve_scenarios, session_id,
+        shell_join, shell_quote, target_triple_for_arch,
     };
     use serde_json::{Value, json};
+    use std::time::Duration;
 
     #[test]
     fn resolve_scenarios_matches_supported_values() {
@@ -1295,5 +1308,68 @@ mod tests {
         assert_eq!(parse_duration("2m").unwrap().as_secs(), 120);
         assert_eq!(parse_duration("150ms").unwrap().as_millis(), 150);
         assert_eq!(format_duration(parse_duration("20s").unwrap()), "20s");
+    }
+
+    #[test]
+    fn normalize_remote_arch_and_target_match_supported_values() {
+        assert_eq!(normalize_remote_arch("x86_64").unwrap(), "amd64");
+        assert_eq!(normalize_remote_arch("amd64").unwrap(), "amd64");
+        assert_eq!(normalize_remote_arch("arm64").unwrap(), "arm64");
+        assert_eq!(normalize_remote_arch("aarch64").unwrap(), "arm64");
+        assert_eq!(
+            target_triple_for_arch("amd64").unwrap(),
+            "x86_64-apple-darwin"
+        );
+        assert_eq!(
+            target_triple_for_arch("arm64").unwrap(),
+            "aarch64-apple-darwin"
+        );
+        assert!(normalize_remote_arch("sparc").is_err());
+        assert!(target_triple_for_arch("sparc").is_err());
+    }
+
+    #[test]
+    fn build_remote_smoke_command_carries_expected_flags() {
+        let cfg = super::CliConfig {
+            remote_control_bin: String::new(),
+            safaridriver_bin: "/Applications/Safari Driver.app/Contents/MacOS/safaridriver"
+                .to_string(),
+            safaridriver_port: 5555,
+            bind: "127.0.0.1".to_string(),
+            scenario_csv: "readwrite,no-token".to_string(),
+            scenarios: resolve_scenarios("readwrite,no-token").unwrap(),
+            driver_startup: Duration::from_secs(12),
+            scenario_timeout: Duration::from_secs(40),
+            keep_artifacts: true,
+            verbose: true,
+            skip_build: false,
+            ssh_host: "example-host".to_string(),
+            ssh_port: 22,
+            ssh_user: "builder".to_string(),
+            no_ssh: false,
+        };
+
+        let args = build_remote_smoke_args(&cfg);
+        assert!(args.contains(&"--no-ssh".to_string()));
+        assert!(args.contains(&"--keep-artifacts".to_string()));
+        assert!(args.contains(&"--verbose".to_string()));
+        assert!(args.contains(&"readwrite,no-token".to_string()));
+        assert!(args.contains(&"5555".to_string()));
+
+        let command = build_remote_smoke_command(&cfg, "/Users/example/Development/remote-control");
+        assert!(command.contains("set -e && cd '/Users/example/Development/remote-control'"));
+        assert!(command.contains("chmod +x ./remote-control ./rc-safari-smoke"));
+        assert!(command.contains("'./rc-safari-smoke' '--remote-control-bin' './remote-control'"));
+        assert!(command.contains("'--scenarios' 'readwrite,no-token'"));
+        assert!(command.contains("'--driver-timeout' '12s'"));
+        assert!(command.contains("'--scenario-timeout' '40s'"));
+        assert!(command.contains("'--bind' '127.0.0.1'"));
+        assert!(command.contains("'--no-ssh'"));
+        assert!(command.contains("'--keep-artifacts'"));
+        assert!(command.contains("'--verbose'"));
+        assert!(command.contains(
+            "'--safaridriver-bin' '/Applications/Safari Driver.app/Contents/MacOS/safaridriver'"
+        ));
+        assert!(command.contains("'--safaridriver-port' '5555'"));
     }
 }
