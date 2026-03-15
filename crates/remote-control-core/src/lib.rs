@@ -3,6 +3,7 @@ pub mod auth;
 pub mod config;
 pub mod flow;
 pub mod runtime_state;
+pub mod session;
 pub mod tmux;
 pub mod ttydiscover;
 pub mod tunnel_cloudflare;
