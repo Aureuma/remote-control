@@ -496,16 +496,12 @@ pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{LazyLock, Mutex};
-
     use chrono::Utc;
 
     use super::{
         CloudflareTunnelSettings, FlowSettings, SecuritySettings, Settings, TunnelSettings,
         apply_defaults, load, resolve_setting_value,
     };
-
-    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn apply_defaults_flow_and_tunnel() {
@@ -559,7 +555,9 @@ mod tests {
 
     #[test]
     fn load_creates_default_settings() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("SI_REMOTE_CONTROL_HOME", home.path());
@@ -585,7 +583,9 @@ mod tests {
 
     #[test]
     fn resolve_setting_value_prefers_env_references() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         unsafe {
             std::env::set_var("RC_TEST_HOST", "example.local");
         }
