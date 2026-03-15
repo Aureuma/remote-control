@@ -6,6 +6,7 @@ pub mod runtime_state;
 pub mod tmux;
 pub mod ttydiscover;
 pub mod tunnel_cloudflare;
+pub mod websocket_support;
 
 #[cfg(test)]
 pub(crate) mod test_support;
