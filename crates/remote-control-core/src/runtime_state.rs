@@ -135,19 +135,17 @@ fn session_path(runtime_dir: &PathBuf, id: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{LazyLock, Mutex};
-
     use chrono::Utc;
 
     use crate::runtime_state::{
         SessionState, list_sessions, load_session, prune_stale_sessions, save_session,
     };
 
-    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
     #[test]
     fn prune_stale_sessions_removes_only_dead_processes() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let runtime_dir = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("SI_REMOTE_CONTROL_RUNTIME_DIR", runtime_dir.path());
@@ -178,7 +176,9 @@ mod tests {
 
     #[test]
     fn save_and_load_session_with_security_fields() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let runtime_dir = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("SI_REMOTE_CONTROL_RUNTIME_DIR", runtime_dir.path());
