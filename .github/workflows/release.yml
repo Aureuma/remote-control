@@ -41,6 +41,10 @@ jobs:
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/remote-control" "dist/remote-control-${{ matrix.label }}"
 
+      - name: Smoke test native release binary
+        if: matrix.label != 'darwin-amd64'
+        run: ./scripts/remote_control_smoke.sh "target/${{ matrix.target }}/release/remote-control" "release-${{ matrix.label }}" 18182
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
