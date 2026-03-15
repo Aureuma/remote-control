@@ -1,49 +1,55 @@
 # remote-control
 
-`remote-control` serves a local terminal session to a browser.
+`remote-control` serves a local terminal session to a browser from Rust binaries.
 
-Implemented scope (Phase 0-5):
-- Go-first server with embedded browser UI.
+Implemented scope:
+- Rust server with embedded browser UI.
 - tmux session discovery and attach mode.
 - command mode (`--cmd`) for spawning a new PTY process.
 - websocket auth handshake with per-session token.
 - websocket flow control (ACK + high/low watermarks).
 - browser reconnect behavior with automatic resume.
-- optional Cloudflare ephemeral tunnel integration.
+- optional Cloudflare tunnel integration.
 - optional macOS `caffeinate` integration.
 - settings and runtime state under `~/.si/remote-control`.
 - token TTL enforcement and idle-timeout session shutdown.
 - same-host/origin websocket checks compatible with public tunnel hostnames.
-- regression tests for flow, tunnel URL parsing, token expiry, tmux parsing, and runtime state pruning.
-
-Production hardening implemented:
-- named Cloudflare tunnel mode (`--tunnel-mode named`) with custom hostname support.
-- direct existing TTY attach (`attach --tty-path /dev/pts/N`) in addition to tmux attach.
-- optional access-code auth and optional token omission from URL.
-- release automation for tagged binaries/checksums.
-- expanded soak/chaos coverage for reconnect, auth, and attach modes.
-- detailed roadmap in `docs/production-hardening-plan.md`.
+- real Safari smoke coverage via the Rust `rc-safari-smoke` binary.
 
 ## Commands
 
-- `remote-control sessions [--all]`
-- `remote-control attach [--tmux-session <name> | --tty-path <path>] [--port 8080] [--tunnel|--no-tunnel]`
-- `remote-control start --cmd "bash" [--port 8080] [--tunnel|--no-tunnel] [--tunnel-mode ephemeral|named] [--tunnel-hostname <host>]`
-- `remote-control status`
-- `remote-control stop --id <session-id>`
+- `cargo run -p remote-control -- sessions [--all]`
+- `cargo run -p remote-control -- attach [--tmux-session <name> | --tty-path <path>] [--port 8080] [--tunnel|--no-tunnel]`
+- `cargo run -p remote-control -- start --cmd "bash" [--port 8080] [--tunnel|--no-tunnel] [--tunnel-mode ephemeral|named] [--tunnel-hostname <host>]`
+- `cargo run -p remote-control -- status`
+- `cargo run -p remote-control -- stop --id <session-id>`
+
+You can also build standalone binaries:
+
+```bash
+cargo build -p remote-control -p rc-safari-smoke
+./target/debug/remote-control --help
+./target/debug/rc-safari-smoke --help
+```
 
 ## Notes
 
 - Default mode is read-only.
 - Tunnel is enabled by default; if `cloudflared` is missing, command falls back to local-only mode unless `--tunnel-required` is set.
-- For attach mode, tmux must be installed and session name must exist.
+- For attach mode, tmux must be installed and the session name must exist.
 - For direct TTY attach mode, pass an explicit TTY path (`--tty-path /dev/pts/N`).
 - For stronger auth, use `--access-code <code>` and optionally `--no-token-in-url`.
 
+## Browser Validation
+
+- Install browser test deps: `npm ci`
+- Install Playwright browsers: `npx playwright install chromium webkit`
+- Run browser suite against the Rust binary: `npm run test:browser`
+
 ## Real Safari Smoke (macOS)
 
-- Command: `go run ./cmd/rc-safari-smoke`
-- This uses a real local Safari instance via `safaridriver` (not headless/webkit emulation).
+- Command: `cargo run -p rc-safari-smoke --`
+- This uses a real local Safari instance via `safaridriver`.
 - Default scenarios:
   - `readwrite`
   - `readonly`
@@ -63,14 +69,14 @@ Production hardening implemented:
 - `--driver-timeout 20s`
 - `--verbose`
 - `--keep-artifacts`
-- `--remote-control-bin /path/to/remote-control` (skip auto-build)
+- `--remote-control-bin /path/to/remote-control`
 
 ### Dev SSH fallback (non-macOS host)
 
-When `rc-safari-smoke` runs on Linux, it can automatically run the smoke suite over SSH on a macOS machine.
+When `rc-safari-smoke` runs on a non-macOS host, it can run the smoke suite over SSH on a macOS machine.
 Store SSH config in `~/.si/remote-control/settings.toml` under `development.safari.ssh`.
 
-Use env-key references only (no hardcoded secrets in repo):
+Use env-key references only:
 
 ```toml
 [development]
@@ -96,9 +102,4 @@ CLI overrides:
 ## Releases
 
 - Tag pushes matching `v*` trigger `.github/workflows/release.yml`.
-- Release workflow builds:
-  - `remote-control-linux-amd64`
-  - `remote-control-linux-arm64`
-  - `remote-control-darwin-amd64`
-  - `remote-control-darwin-arm64`
-- Workflow publishes binaries and `checksums.txt` to the GitHub Release.
+- CI and release pipelines build the Rust `remote-control` binary.

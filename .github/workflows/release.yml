@@ -11,45 +11,41 @@ permissions:
 
 jobs:
   build:
-    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
-    runs-on: ubuntu-latest
+    name: Build (${{ matrix.label }})
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
+          - runner: ubuntu-latest
+            label: linux-amd64
+            target: x86_64-unknown-linux-gnu
+          - runner: macos-latest
+            label: darwin-arm64
+            target: aarch64-apple-darwin
+          - runner: macos-latest
+            label: darwin-amd64
+            target: x86_64-apple-darwin
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          go-version-file: go.mod
-          cache: true
+          targets: ${{ matrix.target }}
 
       - name: Build binary
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
         run: |
+          cargo build --release -p remote-control --target "${{ matrix.target }}"
           mkdir -p dist
-          out="dist/remote-control-${GOOS}-${GOARCH}"
-          go build -trimpath -buildvcs=false -ldflags="-s -w" -o "${out}" ./cmd/remote-control
+          cp "target/${{ matrix.target }}/release/remote-control" "dist/remote-control-${{ matrix.label }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: remote-control-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/remote-control-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: remote-control-${{ matrix.label }}
+          path: dist/remote-control-${{ matrix.label }}
           if-no-files-found: error
 
   publish:
@@ -72,7 +68,7 @@ jobs:
       - name: Generate checksums
         run: |
           cd release
-          sha256sum remote-control-* > checksums.txt
+          shasum -a 256 remote-control-* > checksums.txt
 
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
