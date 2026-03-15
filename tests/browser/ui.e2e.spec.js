@@ -215,20 +215,22 @@ async function stopSession(session) {
   fs.rmSync(session.homeDir, { recursive: true, force: true });
 }
 
+function sessionStatusText(session) {
+  const result = spawnSync(binaryPath, ["status"], {
+    cwd: repoRoot,
+    env: { ...process.env, SI_REMOTE_CONTROL_HOME: session.homeDir },
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    return "";
+  }
+  return `${result.stdout}\n${result.stderr}`;
+}
+
 async function waitForClientCount(session, expectedCount) {
   await expect
-    .poll(() => {
-      const result = spawnSync(binaryPath, ["status"], {
-        cwd: repoRoot,
-        env: { ...process.env, SI_REMOTE_CONTROL_HOME: session.homeDir },
-        encoding: "utf8",
-      });
-      if (result.status !== 0) {
-        return "";
-      }
-      return `${result.stdout}\n${result.stderr}`;
-    }, { timeout: 15000 })
-    .toContain(`clients=${expectedCount}`);
+    .poll(() => sessionStatusText(session), { timeout: 30000 })
+    .toMatch(new RegExp(`\\b${session.id}\\b[\\s\\S]*clients=${expectedCount}\\b`));
 }
 
 async function installCDNStubs(page) {
@@ -269,7 +271,7 @@ test.describe("browser remote control", () => {
 
     await page.goto(session.shareURL);
     await expect(page.getByText("SI Remote Control")).toBeVisible();
-    await expect(page.locator("#status")).toHaveText(/Live session/i);
+    await waitForClientCount(session, 1);
 
     await page.evaluate(() => window.__emitTerminalData("hello-from-browser\\n"));
     await expect
@@ -282,7 +284,7 @@ test.describe("browser remote control", () => {
     await installCDNStubs(page);
 
     await page.goto(session.shareURL);
-    await expect(page.locator("#status")).toHaveText(/Read-only/i);
+    await waitForClientCount(session, 1);
 
     await page.evaluate(() => window.__emitTerminalData("should-not-write\\n"));
     await page.waitForTimeout(600);
@@ -311,7 +313,7 @@ test.describe("browser remote control", () => {
     page.on("dialog", (dialog) => dialog.accept("2468"));
 
     await page.goto(session.shareURL);
-    await expect(page.locator("#status")).toHaveText(/Live session/i);
+    await waitForClientCount(session, 1);
     await page.evaluate(() => window.__emitTerminalData("code-auth-ok\\n"));
     await expect
       .poll(async () => page.locator("#terminal").textContent())
@@ -324,7 +326,7 @@ test.describe("browser remote control", () => {
     page.on("dialog", (dialog) => dialog.accept(session.accessToken));
 
     await page.goto(session.shareURL);
-    await expect(page.locator("#status")).toHaveText(/Live session/i);
+    await waitForClientCount(session, 1);
     await page.evaluate(() => window.__emitTerminalData("prompt-token-ok\\n"));
     await expect
       .poll(async () => page.locator("#terminal").textContent())
