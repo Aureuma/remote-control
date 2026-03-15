@@ -2,7 +2,9 @@ pub mod app;
 pub mod auth;
 pub mod config;
 pub mod flow;
+pub mod power_macos;
 pub mod runtime_state;
+pub mod safari_smoke;
 pub mod server;
 pub mod session;
 pub mod tmux;
@@ -21,6 +23,6 @@ pub fn run_remote_control(args: &[OsString]) -> Result<i32> {
     app::run(args)
 }
 
-pub fn run_safari_smoke(_args: &[OsString]) -> Result<i32> {
-    Ok(0)
+pub fn run_safari_smoke(args: &[OsString]) -> Result<i32> {
+    safari_smoke::run(args)
 }

@@ -13,7 +13,7 @@ use nix::{
 use chrono::Utc;
 
 use crate::runtime_state::{self, SessionState};
-use crate::{auth, server, session, tmux, ttydiscover};
+use crate::{auth, config, server, session, tmux, ttydiscover};
 
 const USAGE_TEXT: &str = "remote-control commands:\n  remote-control sessions [--all]\n  remote-control attach [--tmux-session <name> | --tty-path <path>] [--port <n>] [--bind <addr>] [--readwrite] [--tunnel|--no-tunnel]\n  remote-control start --cmd \"<command>\" [--port <n>] [--bind <addr>] [--readwrite] [--tunnel|--no-tunnel]\n  remote-control status\n  remote-control stop [--id <session-id>]\n";
 
@@ -120,6 +120,7 @@ fn cmd_attach(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -
         stdout.write_all(b"attach [--tmux-session <name> | --tty-path <path>]\n")?;
         return Ok(0);
     }
+    let settings = config::load()?;
     let tmux_session = value_for_flag(args, "--tmux-session");
     let tty_path = value_for_flag(args, "--tty-path");
     if tmux_session.is_some() && tty_path.is_some() {
@@ -130,15 +131,34 @@ fn cmd_attach(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -
         return Ok(1);
     }
 
-    let bind = value_for_flag(args, "--bind").unwrap_or_else(|| "127.0.0.1".to_string());
+    let bind = value_for_flag(args, "--bind").unwrap_or_else(|| settings.server.bind.clone());
     let port = value_for_flag(args, "--port")
         .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(8080);
-    let readonly = !has_flag(args, "--readwrite");
-    let access_code = value_for_flag(args, "--access-code").unwrap_or_default();
-    let token_in_url = !has_flag(args, "--no-token-in-url");
+        .unwrap_or(settings.server.port as u16);
+    let readonly = if has_flag(args, "--readwrite") {
+        false
+    } else {
+        settings.security.readonly_default
+    };
+    let access_code = value_for_flag(args, "--access-code")
+        .unwrap_or_else(|| settings.security.access_code.clone());
+    let token_in_url = bool_flag_value(
+        args,
+        "--token-in-url",
+        "--no-token-in-url",
+        settings.security.token_in_url.unwrap_or(true),
+    );
     let id = value_for_flag(args, "--id").unwrap_or_else(default_session_id);
-    let issued = auth::new_token_with_ttl(Duration::from_secs(3600))?;
+    let issued = auth::new_token_with_ttl(Duration::from_secs(
+        settings.session.token_ttl_seconds as u64,
+    ))?;
+    let enable_tunnel = bool_flag_value(args, "--tunnel", "--no-tunnel", settings.tunnel.enabled);
+    let enable_caffeinate = bool_flag_value(
+        args,
+        "--caffeinate",
+        "--no-caffeinate",
+        settings.macos.caffeinate,
+    );
 
     if let Some(path) = tty_path {
         let term = match session::Terminal::start_tty_path(&path) {
@@ -156,14 +176,35 @@ fn cmd_attach(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -
                 bind,
                 port,
                 readonly,
-                max_clients: 1,
-                flow_low_bytes: 512 * 1024,
-                flow_high_bytes: 2 * 1024 * 1024,
-                flow_ack_bytes: 256 * 1024,
+                max_clients: settings.session.max_clients as usize,
+                flow_low_bytes: settings.flow.low_watermark_bytes,
+                flow_high_bytes: settings.flow.high_watermark_bytes,
+                flow_ack_bytes: settings.flow.ack_quantum_bytes,
                 access_code,
                 token_in_url,
                 token_expires_at: issued.expires_at,
                 token: issued.value,
+                idle_timeout_seconds: settings.session.idle_timeout_seconds,
+                enable_tunnel,
+                tunnel_required: has_flag(args, "--tunnel-required") || settings.tunnel.required,
+                cloudflared_binary: value_for_flag(args, "--cloudflared-bin")
+                    .unwrap_or_else(|| settings.tunnel.cloudflare.binary.clone()),
+                cloudflare_timeout: Duration::from_secs(
+                    settings.tunnel.cloudflare.startup_timeout_seconds as u64,
+                ),
+                tunnel_mode: value_for_flag(args, "--tunnel-mode")
+                    .unwrap_or_else(|| settings.tunnel.mode.clone()),
+                tunnel_hostname: value_for_flag(args, "--tunnel-hostname")
+                    .unwrap_or_else(|| settings.tunnel.named.hostname.clone()),
+                tunnel_name: value_for_flag(args, "--tunnel-name")
+                    .unwrap_or_else(|| settings.tunnel.named.tunnel_name.clone()),
+                tunnel_token: value_for_flag(args, "--tunnel-token")
+                    .unwrap_or_else(|| settings.tunnel.named.tunnel_token.clone()),
+                tunnel_config_file: value_for_flag(args, "--cloudflared-config")
+                    .unwrap_or_else(|| settings.tunnel.named.config_file.clone()),
+                tunnel_credentials_file: value_for_flag(args, "--cloudflared-credentials")
+                    .unwrap_or_else(|| settings.tunnel.named.credentials_file.clone()),
+                enable_caffeinate,
             },
         ));
     }
@@ -216,14 +257,35 @@ fn cmd_attach(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -
             bind,
             port,
             readonly,
-            max_clients: 1,
-            flow_low_bytes: 512 * 1024,
-            flow_high_bytes: 2 * 1024 * 1024,
-            flow_ack_bytes: 256 * 1024,
+            max_clients: settings.session.max_clients as usize,
+            flow_low_bytes: settings.flow.low_watermark_bytes,
+            flow_high_bytes: settings.flow.high_watermark_bytes,
+            flow_ack_bytes: settings.flow.ack_quantum_bytes,
             access_code,
             token_in_url,
             token_expires_at: issued.expires_at,
             token: issued.value,
+            idle_timeout_seconds: settings.session.idle_timeout_seconds,
+            enable_tunnel,
+            tunnel_required: has_flag(args, "--tunnel-required") || settings.tunnel.required,
+            cloudflared_binary: value_for_flag(args, "--cloudflared-bin")
+                .unwrap_or_else(|| settings.tunnel.cloudflare.binary.clone()),
+            cloudflare_timeout: Duration::from_secs(
+                settings.tunnel.cloudflare.startup_timeout_seconds as u64,
+            ),
+            tunnel_mode: value_for_flag(args, "--tunnel-mode")
+                .unwrap_or_else(|| settings.tunnel.mode.clone()),
+            tunnel_hostname: value_for_flag(args, "--tunnel-hostname")
+                .unwrap_or_else(|| settings.tunnel.named.hostname.clone()),
+            tunnel_name: value_for_flag(args, "--tunnel-name")
+                .unwrap_or_else(|| settings.tunnel.named.tunnel_name.clone()),
+            tunnel_token: value_for_flag(args, "--tunnel-token")
+                .unwrap_or_else(|| settings.tunnel.named.tunnel_token.clone()),
+            tunnel_config_file: value_for_flag(args, "--cloudflared-config")
+                .unwrap_or_else(|| settings.tunnel.named.config_file.clone()),
+            tunnel_credentials_file: value_for_flag(args, "--cloudflared-credentials")
+                .unwrap_or_else(|| settings.tunnel.named.credentials_file.clone()),
+            enable_caffeinate,
         },
     ))
 }
@@ -232,6 +294,7 @@ fn cmd_start(args: &[String], _stdout: &mut dyn Write, stderr: &mut dyn Write) -
     if has_help(args) {
         return Ok(0);
     }
+    let settings = config::load()?;
     let Some(command) = value_for_flag(args, "--cmd") else {
         writeln!(stderr, "error: --cmd is required")?;
         return Ok(1);
@@ -248,15 +311,34 @@ fn cmd_start(args: &[String], _stdout: &mut dyn Write, stderr: &mut dyn Write) -
             return Ok(1);
         }
     }
-    let bind = value_for_flag(args, "--bind").unwrap_or_else(|| "127.0.0.1".to_string());
+    let bind = value_for_flag(args, "--bind").unwrap_or_else(|| settings.server.bind.clone());
     let port = port_value
         .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(8080);
-    let readonly = !has_flag(args, "--readwrite");
-    let access_code = value_for_flag(args, "--access-code").unwrap_or_default();
-    let token_in_url = !has_flag(args, "--no-token-in-url");
+        .unwrap_or(settings.server.port as u16);
+    let readonly = if has_flag(args, "--readwrite") {
+        false
+    } else {
+        settings.security.readonly_default
+    };
+    let access_code = value_for_flag(args, "--access-code")
+        .unwrap_or_else(|| settings.security.access_code.clone());
+    let token_in_url = bool_flag_value(
+        args,
+        "--token-in-url",
+        "--no-token-in-url",
+        settings.security.token_in_url.unwrap_or(true),
+    );
     let id = value_for_flag(args, "--id").unwrap_or_else(default_session_id);
-    let issued = auth::new_token_with_ttl(Duration::from_secs(3600))?;
+    let issued = auth::new_token_with_ttl(Duration::from_secs(
+        settings.session.token_ttl_seconds as u64,
+    ))?;
+    let enable_tunnel = bool_flag_value(args, "--tunnel", "--no-tunnel", settings.tunnel.enabled);
+    let enable_caffeinate = bool_flag_value(
+        args,
+        "--caffeinate",
+        "--no-caffeinate",
+        settings.macos.caffeinate,
+    );
     let term = match session::Terminal::start_command(&command) {
         Ok(term) => term,
         Err(err) => {
@@ -272,14 +354,35 @@ fn cmd_start(args: &[String], _stdout: &mut dyn Write, stderr: &mut dyn Write) -
             bind,
             port,
             readonly,
-            max_clients: 1,
-            flow_low_bytes: 512 * 1024,
-            flow_high_bytes: 2 * 1024 * 1024,
-            flow_ack_bytes: 256 * 1024,
+            max_clients: settings.session.max_clients as usize,
+            flow_low_bytes: settings.flow.low_watermark_bytes,
+            flow_high_bytes: settings.flow.high_watermark_bytes,
+            flow_ack_bytes: settings.flow.ack_quantum_bytes,
             access_code,
             token_in_url,
             token_expires_at: issued.expires_at,
             token: issued.value,
+            idle_timeout_seconds: settings.session.idle_timeout_seconds,
+            enable_tunnel,
+            tunnel_required: has_flag(args, "--tunnel-required") || settings.tunnel.required,
+            cloudflared_binary: value_for_flag(args, "--cloudflared-bin")
+                .unwrap_or_else(|| settings.tunnel.cloudflare.binary.clone()),
+            cloudflare_timeout: Duration::from_secs(
+                settings.tunnel.cloudflare.startup_timeout_seconds as u64,
+            ),
+            tunnel_mode: value_for_flag(args, "--tunnel-mode")
+                .unwrap_or_else(|| settings.tunnel.mode.clone()),
+            tunnel_hostname: value_for_flag(args, "--tunnel-hostname")
+                .unwrap_or_else(|| settings.tunnel.named.hostname.clone()),
+            tunnel_name: value_for_flag(args, "--tunnel-name")
+                .unwrap_or_else(|| settings.tunnel.named.tunnel_name.clone()),
+            tunnel_token: value_for_flag(args, "--tunnel-token")
+                .unwrap_or_else(|| settings.tunnel.named.tunnel_token.clone()),
+            tunnel_config_file: value_for_flag(args, "--cloudflared-config")
+                .unwrap_or_else(|| settings.tunnel.named.config_file.clone()),
+            tunnel_credentials_file: value_for_flag(args, "--cloudflared-credentials")
+                .unwrap_or_else(|| settings.tunnel.named.credentials_file.clone()),
+            enable_caffeinate,
         },
     ))
 }
@@ -468,6 +571,16 @@ fn has_help(args: &[String]) -> bool {
 
 fn has_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
+}
+
+fn bool_flag_value(args: &[String], enable_flag: &str, disable_flag: &str, default: bool) -> bool {
+    if has_flag(args, disable_flag) {
+        return false;
+    }
+    if has_flag(args, enable_flag) {
+        return true;
+    }
+    default
 }
 
 fn default_session_id() -> String {
