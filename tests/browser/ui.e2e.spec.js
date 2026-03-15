@@ -61,13 +61,20 @@ window.FitAddon = {
 function ensureBinaryBuilt() {
   if (binaryReady) return;
   fs.mkdirSync(buildDir, { recursive: true });
-  const result = spawnSync("go", ["build", "-o", binaryPath, "./cmd/remote-control"], {
+  const result = spawnSync("cargo", ["build", "-p", "remote-control"], {
     cwd: repoRoot,
     encoding: "utf8",
   });
   if (result.status !== 0) {
-    throw new Error(`go build failed:\\n${result.stdout}\\n${result.stderr}`);
+    throw new Error(`cargo build failed:\\n${result.stdout}\\n${result.stderr}`);
   }
+  const targetBinary = path.join(
+    repoRoot,
+    "target",
+    "debug",
+    process.platform === "win32" ? "remote-control.exe" : "remote-control",
+  );
+  fs.copyFileSync(targetBinary, binaryPath);
   binaryReady = true;
 }
 

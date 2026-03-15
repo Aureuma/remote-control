@@ -466,6 +466,57 @@ async fn handle_socket(socket: WebSocket, state: AppState, _addr: SocketAddr) {
         .insert(client_id, tx);
     update_client_count(&state);
 
+    let _ = sender
+        .send(WsMessage::Text(
+            serde_json::to_string(&Message {
+                kind: "auth_ok".to_string(),
+                token: String::new(),
+                code: String::new(),
+                data: String::new(),
+                columns: None,
+                rows: None,
+                bytes: None,
+                message: String::new(),
+            })
+            .unwrap()
+            .into(),
+        ))
+        .await;
+    let _ = sender
+        .send(WsMessage::Text(
+            serde_json::to_string(&Message {
+                kind: "prefs".to_string(),
+                token: String::new(),
+                code: String::new(),
+                data: String::new(),
+                columns: None,
+                rows: None,
+                bytes: Some(state.ack_quantum_bytes),
+                message: String::new(),
+            })
+            .unwrap()
+            .into(),
+        ))
+        .await;
+    if state.readonly {
+        let _ = sender
+            .send(WsMessage::Text(
+                serde_json::to_string(&Message {
+                    kind: "readonly".to_string(),
+                    token: String::new(),
+                    code: String::new(),
+                    data: String::new(),
+                    columns: None,
+                    rows: None,
+                    bytes: None,
+                    message: "Read-only mode enabled".to_string(),
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await;
+    }
+
     let send_task = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
             match message {
@@ -482,51 +533,6 @@ async fn handle_socket(socket: WebSocket, state: AppState, _addr: SocketAddr) {
             }
         }
     });
-
-    broadcast_one(
-        &state,
-        client_id,
-        ServerOutbound::Text(Message {
-            kind: "auth_ok".to_string(),
-            token: String::new(),
-            code: String::new(),
-            data: String::new(),
-            columns: None,
-            rows: None,
-            bytes: None,
-            message: String::new(),
-        }),
-    );
-    broadcast_one(
-        &state,
-        client_id,
-        ServerOutbound::Text(Message {
-            kind: "prefs".to_string(),
-            token: String::new(),
-            code: String::new(),
-            data: String::new(),
-            columns: None,
-            rows: None,
-            bytes: Some(state.ack_quantum_bytes),
-            message: String::new(),
-        }),
-    );
-    if state.readonly {
-        broadcast_one(
-            &state,
-            client_id,
-            ServerOutbound::Text(Message {
-                kind: "readonly".to_string(),
-                token: String::new(),
-                code: String::new(),
-                data: String::new(),
-                columns: None,
-                rows: None,
-                bytes: None,
-                message: "Read-only mode enabled".to_string(),
-            }),
-        );
-    }
 
     while let Some(Ok(message)) = receiver.next().await {
         match message {
