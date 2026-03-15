@@ -10,6 +10,7 @@ use nix::{
 };
 
 use crate::runtime_state::{self, SessionState};
+use crate::{tmux, ttydiscover};
 
 const USAGE_TEXT: &str = "remote-control commands:\n  remote-control sessions [--all]\n  remote-control attach [--tmux-session <name> | --tty-path <path>] [--port <n>] [--bind <addr>] [--readwrite] [--tunnel|--no-tunnel]\n  remote-control start --cmd \"<command>\" [--port <n>] [--bind <addr>] [--readwrite] [--tunnel|--no-tunnel]\n  remote-control status\n  remote-control stop [--id <session-id>]\n";
 
@@ -54,15 +55,61 @@ fn cmd_sessions(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write)
         stdout.write_all(b"sessions [--all]\n")?;
         return Ok(0);
     }
+    let all = args.iter().any(|arg| arg == "--all");
     if args.iter().any(|arg| arg != "--all") {
         writeln!(stderr, "error: unsupported sessions flags")?;
         return Ok(1);
     }
-    writeln!(
-        stdout,
-        "info: Rust sessions listing is not implemented yet."
-    )?;
-    Ok(0)
+    let mut exit_code = 0;
+    match tmux::list_sessions() {
+        Ok(sessions) if sessions.is_empty() => {
+            writeln!(stdout, "No tmux sessions found.")?;
+        }
+        Ok(sessions) => {
+            writeln!(stdout, "Available tmux sessions")?;
+            for session in sessions {
+                writeln!(
+                    stdout,
+                    "- {} (windows={}, attached={}, created={})",
+                    session.name, session.windows, session.attached, session.created
+                )?;
+            }
+        }
+        Err(err) if all => {
+            writeln!(stderr, "warning: Could not list tmux sessions: {err}")?;
+            exit_code = 1;
+        }
+        Err(err) => {
+            writeln!(stderr, "error: Could not list tmux sessions: {err}")?;
+            return Ok(1);
+        }
+    }
+
+    if !all {
+        return Ok(exit_code);
+    }
+
+    match ttydiscover::list() {
+        Ok(candidates) if candidates.is_empty() => {
+            writeln!(stdout, "No direct TTY candidates found.")?;
+        }
+        Ok(candidates) => {
+            writeln!(stdout, "Direct TTY candidates")?;
+            for candidate in candidates {
+                writeln!(
+                    stdout,
+                    "- pid={} tty={} cmd={} args={}",
+                    candidate.pid, candidate.tty, candidate.command, candidate.args
+                )?;
+            }
+        }
+        Err(err) => {
+            writeln!(stderr, "warning: Could not discover TTY candidates: {err}")?;
+            exit_code = 1;
+        }
+    }
+
+    Ok(exit_code)
 }
 
 fn cmd_attach(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> Result<i32> {
