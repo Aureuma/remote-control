@@ -10,7 +10,7 @@ use nix::{
 };
 
 use crate::runtime_state::{self, SessionState};
-use crate::{tmux, ttydiscover};
+use crate::{session, tmux, ttydiscover};
 
 const USAGE_TEXT: &str = "remote-control commands:\n  remote-control sessions [--all]\n  remote-control attach [--tmux-session <name> | --tty-path <path>] [--port <n>] [--bind <addr>] [--readwrite] [--tunnel|--no-tunnel]\n  remote-control start --cmd \"<command>\" [--port <n>] [--bind <addr>] [--readwrite] [--tunnel|--no-tunnel]\n  remote-control status\n  remote-control stop [--id <session-id>]\n";
 
@@ -126,16 +126,69 @@ fn cmd_attach(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -
         )?;
         return Ok(1);
     }
-    if tmux_session.is_some() || tty_path.is_some() {
+
+    if let Some(path) = tty_path {
+        match session::Terminal::start_tty_path(&path) {
+            Ok(term) => {
+                let _ = term.close();
+            }
+            Err(err) => {
+                writeln!(stderr, "error: Could not attach tty path \"{path}\": {err}")?;
+                return Ok(1);
+            }
+        }
         writeln!(
             stderr,
-            "error: attach implementation has not been ported to Rust yet"
+            "error: attach session startup works, but the Rust server layer is not ported yet"
         )?;
         return Ok(1);
     }
+
+    let sessions = match tmux::list_sessions() {
+        Ok(sessions) => sessions,
+        Err(err) => {
+            writeln!(stderr, "error: Could not discover tmux sessions: {err}")?;
+            return Ok(1);
+        }
+    };
+    if sessions.is_empty() {
+        writeln!(
+            stderr,
+            "error: No tmux sessions found. Start one with: tmux new -s my-session"
+        )?;
+        return Ok(1);
+    }
+
+    let name = tmux_session.unwrap_or_else(|| sessions[0].name.clone());
+    if !sessions.iter().any(|session| session.name == name) {
+        let mut names = sessions
+            .iter()
+            .map(|session| session.name.clone())
+            .collect::<Vec<_>>();
+        names.sort();
+        writeln!(
+            stderr,
+            "error: tmux session \"{name}\" not found. Available: {}",
+            names.join(", ")
+        )?;
+        return Ok(1);
+    }
+
+    match session::Terminal::start_attach(&name) {
+        Ok(term) => {
+            let _ = term.close();
+        }
+        Err(err) => {
+            writeln!(
+                stderr,
+                "error: Could not attach tmux session \"{name}\": {err}"
+            )?;
+            return Ok(1);
+        }
+    }
     writeln!(
         stderr,
-        "error: attach implementation has not been ported to Rust yet"
+        "error: attach session startup works, but the Rust server layer is not ported yet"
     )?;
     Ok(1)
 }
@@ -159,9 +212,18 @@ fn cmd_start(args: &[String], _stdout: &mut dyn Write, stderr: &mut dyn Write) -
             return Ok(1);
         }
     }
+    match session::Terminal::start_command(&command) {
+        Ok(term) => {
+            let _ = term.close();
+        }
+        Err(err) => {
+            writeln!(stderr, "error: Could not start command session: {err}")?;
+            return Ok(1);
+        }
+    }
     writeln!(
         stderr,
-        "error: start implementation has not been ported to Rust yet"
+        "error: command session startup works, but the Rust server layer is not ported yet"
     )?;
     Ok(1)
 }
