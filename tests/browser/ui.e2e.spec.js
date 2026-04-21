@@ -228,8 +228,9 @@ function sessionStatusText(session) {
 }
 
 async function waitForClientCount(session, expectedCount) {
+  const timeoutMs = process.env.CI ? 60000 : 30000;
   await expect
-    .poll(() => sessionStatusText(session), { timeout: 30000 })
+    .poll(() => sessionStatusText(session), { timeout: timeoutMs })
     .toMatch(new RegExp(`\\b${session.id}\\b[\\s\\S]*clients=${expectedCount}\\b`));
 }
 
