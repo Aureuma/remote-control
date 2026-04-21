@@ -261,7 +261,10 @@ async function installCDNStubs(page) {
 test.describe("browser remote control", () => {
   let session;
 
-  test.afterEach(async () => {
+  test.afterEach(async ({ page }) => {
+    if (!page.isClosed()) {
+      await page.close();
+    }
     await stopSession(session);
     session = undefined;
   });
