@@ -29,8 +29,14 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run cargo test
-        run: cargo test -- --test-threads=1
+      - name: Run main Rust test suite
+        run: cargo test -- --test-threads=1 --skip run_stop_cleans_stale_session --skip websocket_readonly_blocks_input
+
+      - name: Run stale session cleanup test
+        run: cargo test run_stop_cleans_stale_session -- --test-threads=1
+
+      - name: Run readonly websocket test
+        run: cargo test websocket_readonly_blocks_input -- --test-threads=1
 
       - name: Build native release binary
         run: cargo build --release -p remote-control
