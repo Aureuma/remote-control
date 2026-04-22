@@ -29,6 +29,9 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
       - name: Run main Rust test suite
         run: cargo test -- --test-threads=1 --skip run_stop_cleans_stale_session --skip websocket_readonly_blocks_input
 
@@ -58,6 +61,9 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -68,7 +74,7 @@ jobs:
         run: npm ci
 
       - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium webkit
+        run: npx playwright install --with-deps ${{ matrix.browser }}
 
       - name: Run browser E2E
         run: npm run test:browser -- --project=${{ matrix.browser }}
