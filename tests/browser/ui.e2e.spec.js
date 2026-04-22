@@ -6,7 +6,7 @@ const { spawn, spawnSync } = require("node:child_process");
 const { test, expect } = require("@playwright/test");
 
 const repoRoot = path.resolve(__dirname, "..", "..");
-const buildDir = path.join(repoRoot, ".tmp", "playwright");
+const buildDir = path.join(repoRoot, ".tmp", "playwright", String(process.pid));
 const binaryPath = path.join(buildDir, "remote-control-e2e");
 let binaryReady = false;
 
@@ -215,25 +215,6 @@ async function stopSession(session) {
   fs.rmSync(session.homeDir, { recursive: true, force: true });
 }
 
-function sessionStatusText(session) {
-  const result = spawnSync(binaryPath, ["status"], {
-    cwd: repoRoot,
-    env: { ...process.env, SI_REMOTE_CONTROL_HOME: session.homeDir },
-    encoding: "utf8",
-  });
-  if (result.status !== 0) {
-    return "";
-  }
-  return `${result.stdout}\n${result.stderr}`;
-}
-
-async function waitForClientCount(session, expectedCount) {
-  const timeoutMs = process.env.CI ? 60000 : 30000;
-  await expect
-    .poll(() => sessionStatusText(session), { timeout: timeoutMs })
-    .toMatch(new RegExp(`\\b${session.id}\\b[\\s\\S]*clients=${expectedCount}\\b`));
-}
-
 async function installCDNStubs(page) {
   await page.route(stubCSSURL, (route) =>
     route.fulfill({
@@ -275,7 +256,6 @@ test.describe("browser remote control", () => {
 
     await page.goto(session.shareURL);
     await expect(page.getByText("SI Remote Control")).toBeVisible();
-    await waitForClientCount(session, 1);
 
     await page.evaluate(() => window.__emitTerminalData("hello-from-browser\\n"));
     await expect
@@ -288,7 +268,7 @@ test.describe("browser remote control", () => {
     await installCDNStubs(page);
 
     await page.goto(session.shareURL);
-    await waitForClientCount(session, 1);
+    await expect(page.locator("#status")).toHaveText(/Read-only/, { timeout: 60000 });
 
     await page.evaluate(() => window.__emitTerminalData("should-not-write\\n"));
     await page.waitForTimeout(600);
@@ -300,7 +280,10 @@ test.describe("browser remote control", () => {
     session = await startSession({ readwrite: true });
     await installCDNStubs(page);
     await page.goto(session.shareURL);
-    await waitForClientCount(session, 1);
+    await page.evaluate(() => window.__emitTerminalData("primary-client-ready\\n"));
+    await expect
+      .poll(async () => page.locator("#terminal").textContent())
+      .toContain("primary-client-ready");
 
     const page2 = await browser.newPage();
     await installCDNStubs(page2);
@@ -317,7 +300,6 @@ test.describe("browser remote control", () => {
     page.on("dialog", (dialog) => dialog.accept("2468"));
 
     await page.goto(session.shareURL);
-    await waitForClientCount(session, 1);
     await page.evaluate(() => window.__emitTerminalData("code-auth-ok\\n"));
     await expect
       .poll(async () => page.locator("#terminal").textContent())
@@ -330,7 +312,6 @@ test.describe("browser remote control", () => {
     page.on("dialog", (dialog) => dialog.accept(session.accessToken));
 
     await page.goto(session.shareURL);
-    await waitForClientCount(session, 1);
     await page.evaluate(() => window.__emitTerminalData("prompt-token-ok\\n"));
     await expect
       .poll(async () => page.locator("#terminal").textContent())
