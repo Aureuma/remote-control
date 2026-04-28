@@ -31,19 +31,22 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
         with:
           targets: ${{ matrix.target }}
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
 
       - name: Build binary
         run: |
           cargo build --release -p remote-control --target "${{ matrix.target }}"
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/remote-control" "dist/remote-control-${{ matrix.label }}"
+          cp ".artifacts/cargo-target/${{ matrix.target }}/release/remote-control" "dist/remote-control-${{ matrix.label }}"
 
       - name: Smoke test native release binary
         if: matrix.label != 'darwin-amd64'
-        run: ./scripts/remote_control_smoke.sh "target/${{ matrix.target }}/release/remote-control" "release-${{ matrix.label }}" 18182
+        run: ./scripts/remote_control_smoke.sh ".artifacts/cargo-target/${{ matrix.target }}/release/remote-control" "release-${{ matrix.label }}" 18182
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

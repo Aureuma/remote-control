@@ -27,7 +27,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
@@ -45,7 +45,7 @@ jobs:
         run: cargo build --release -p remote-control
 
       - name: Smoke test native release binary
-        run: ./scripts/remote_control_smoke.sh ./target/release/remote-control "ci-${{ matrix.os }}" 18182
+        run: ./scripts/remote_control_smoke.sh ./.artifacts/cargo-target/release/remote-control "ci-${{ matrix.os }}" 18182
 
   browser-e2e:
     name: Browser E2E (${{ matrix.browser }})
@@ -59,7 +59,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2

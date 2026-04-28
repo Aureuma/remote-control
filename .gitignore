@@ -4,6 +4,7 @@
 node_modules/
 test-results/
 target/
+.artifacts/
 tickets/
 .DS_Store
 *.log
