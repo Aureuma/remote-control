@@ -69,11 +69,21 @@ function ensureBinaryBuilt() {
     throw new Error(`cargo build failed:\\n${result.stdout}\\n${result.stderr}`);
   }
   const targetBinary = path.join(
-    repoRoot,
-    "target",
+    process.env.CARGO_TARGET_DIR || path.join(repoRoot, ".artifacts", "cargo-target"),
     "debug",
     process.platform === "win32" ? "remote-control.exe" : "remote-control",
   );
+  if (!fs.existsSync(targetBinary)) {
+    const fallbackBinary = path.join(
+      repoRoot,
+      "target",
+      "debug",
+      process.platform === "win32" ? "remote-control.exe" : "remote-control",
+    );
+    fs.copyFileSync(fallbackBinary, binaryPath);
+    binaryReady = true;
+    return;
+  }
   fs.copyFileSync(targetBinary, binaryPath);
   binaryReady = true;
 }
