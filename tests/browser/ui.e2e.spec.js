@@ -10,9 +10,9 @@ const buildDir = path.join(repoRoot, ".tmp", "playwright", String(process.pid));
 const binaryPath = path.join(buildDir, "remote-control-e2e");
 let binaryReady = false;
 
-const stubCSSURL = "https://cdn.jsdelivr.net/npm/xterm@5.5.0/css/xterm.min.css";
-const stubXtermURL = "https://cdn.jsdelivr.net/npm/xterm@5.5.0/lib/xterm.min.js";
-const stubFitURL = "https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.10.0/lib/xterm-addon-fit.min.js";
+const stubCSSURL = "https://unpkg.com/xterm.5.0/css/xterm.min.css";
+const stubXtermURL = "https://unpkg.com/xterm.5.0/lib/xterm.min.js";
+const stubFitURL = "https://unpkg.com/xterm-addon-fit.10.0/lib/xterm-addon-fit.min.js";
 
 const xtermStubJS = `
 (() => {
