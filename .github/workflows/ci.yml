@@ -71,10 +71,10 @@ jobs:
           cache: npm
 
       - name: Install browser test deps
-        run: npm ci
+        run: corepack pnpm install --frozen-lockfile
 
       - name: Install Playwright browsers
-        run: npx playwright install --with-deps ${{ matrix.browser }}
+        run: corepack pnpm dlx playwright install --with-deps ${{ matrix.browser }}
 
       - name: Run browser E2E
-        run: npm run test:browser -- --project=${{ matrix.browser }}
+        run: corepack pnpm test:browser -- --project=${{ matrix.browser }}

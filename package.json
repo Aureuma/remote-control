@@ -6,5 +6,6 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.51.1"
-  }
+  },
+  "packageManager": "pnpm@latest"
 }

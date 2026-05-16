@@ -42,9 +42,9 @@ cargo build -p remote-control -p rc-safari-smoke
 
 ## Browser Validation
 
-- Install browser test deps: `npm ci`
-- Install Playwright browsers: `npx playwright install chromium webkit`
-- Run browser suite against the Rust binary: `npm run test:browser`
+- Install browser test deps: `corepack pnpm install --frozen-lockfile`
+- Install Playwright browsers: `corepack pnpm dlx playwright install chromium webkit`
+- Run browser suite against the Rust binary: `corepack pnpm test:browser`
 
 ## Real Safari Smoke (macOS)
 
