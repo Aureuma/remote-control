@@ -9,6 +9,9 @@ on:
 permissions:
   contents: write
 
+env:
+  CARGO_BUILD_JOBS: 2
+
 jobs:
   build:
     name: Build (${{ matrix.label }})
