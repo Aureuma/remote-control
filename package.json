@@ -2,7 +2,7 @@
   "name": "remote-control",
   "private": true,
   "scripts": {
-    "test:browser": "playwright test -c playwright.config.js"
+    "test:browser": "./scripts/build-guard.sh playwright test -c playwright.config.js --workers=2"
   },
   "devDependencies": {
     "@playwright/test": "^1.51.1"
